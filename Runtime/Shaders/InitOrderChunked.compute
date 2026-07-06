@@ -25,13 +25,34 @@ StructuredBuffer<uint>  _SelectedLevel;    // per-chunk chosen level; 0xFFFFFFFF
 float4 _FrustumPlanes[6];                  // object-space, inward normals, normalized
 float  _CullMargin;
 
-bool InFrustum(float3 pos)
+// Spark packed log-scale range (see GsplatSpark.hlsl UnpackSplat).
+#define LN_SCALE_MIN -12.0
+#define LN_SCALE_MAX 9.0
+
+// Keep a splat unless its 3σ Gaussian FOOTPRINT is fully outside the frustum — NOT just its
+// centre. A centre-only test culls splats whose centre is just past the edge while their
+// footprint is still on screen, which strips/empties partly-visible chunks when the margin is
+// small (the reported "looking-at-it culls" bug). Using the splat's own extent as the margin
+// gives a smooth, content-accurate edge — no whole-chunk pop, no manual margin tuning.
+bool FootprintInFrustum(float3 pos, float footprint)
 {
     [unroll]
     for (int p = 0; p < 6; ++p)
-        if (dot(_FrustumPlanes[p].xyz, pos) + _FrustumPlanes[p].w < -_CullMargin)
+        if (dot(_FrustumPlanes[p].xyz, pos) + _FrustumPlanes[p].w < -(footprint + _CullMargin))
             return false;
     return true;
+}
+
+// Largest 3σ axis of a packed splat (Spark word3 = per-axis 8-bit log-scale).
+float SplatFootprint(uint4 ps)
+{
+    uint3 uScale = uint3(ps.w & 0xFFu, (ps.w >> 8u) & 0xFFu, (ps.w >> 16u) & 0xFFu);
+    float lss = (LN_SCALE_MAX - LN_SCALE_MIN) / 254.0;
+    float3 sc = float3(
+        uScale.x == 0u ? 0.0 : exp(LN_SCALE_MIN + float(uScale.x - 1u) * lss),
+        uScale.y == 0u ? 0.0 : exp(LN_SCALE_MIN + float(uScale.y - 1u) * lss),
+        uScale.z == 0u ? 0.0 : exp(LN_SCALE_MIN + float(uScale.z - 1u) * lss));
+    return 3.0 * max(sc.x, max(sc.y, sc.z));
 }
 #endif
 
@@ -54,7 +75,7 @@ void InitOrderChunked(uint3 id : SV_DispatchThreadID)
 #ifdef FRUSTUM_CULL
     uint4 ps = _PackedSplatsBuffer[idx];
     float3 pos = float3(f16tof32(ps.y & 0xFFFFu), f16tof32((ps.y >> 16u) & 0xFFFFu), f16tof32(ps.z & 0xFFFFu));
-    if (!InFrustum(pos))
+    if (!FootprintInFrustum(pos, SplatFootprint(ps)))
         return;
 #endif
 
