@@ -69,6 +69,11 @@ namespace Gsplat
         uint[] m_selectedLevel;
         readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
+        // R4 streaming-pool state: an owned budget-sized resource populated per refresh.
+        GsplatResourceSpark m_poolResource;
+        bool m_poolMode;
+        public uint m_poolOverflow;
+
         // Per-chunk LOD currently selected this frame (0xFFFFFFFF = culled), for editor debug.
         public uint[] SelectedLevels => m_selectedLevel;
 
@@ -251,61 +256,10 @@ namespace Gsplat
             bool cull, float cullMargin)
         {
             EnsureChunkSetup(table);
-            int maxLod = table.MaxLod;
-
-            bool doDistance = distanceLod && camera != null && maxLod > 0;
-            bool doCull = cull && camera != null;
-            if (doCull) GeometryUtility.CalculateFrustumPlanes(camera, m_worldFrustumPlanes);
-
-            var ls = matrixWorld.lossyScale;
-            float scale = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
-
-            // FOV compensation: reference is a 45° vertical FOV (tan 22.5°); use the smaller of
-            // vertical/horizontal half-fov so wide and tall framings both behave. (PlayCanvas.)
-            Vector3 camLocal = Vector3.zero;
-            float fovScale = 1f, invLogMult = 1f;
-            if (doDistance)
-            {
-                float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
-                float tanHalfH = tanHalfV * camera.aspect;
-                fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
-                camLocal = matrixWorld.inverse.MultiplyPoint3x4(camera.transform.position);
-                invLogMult = 1f / Mathf.Log(Mathf.Max(1.0001f, multiplier));
-                baseDistance = Mathf.Max(1e-4f, baseDistance);
-            }
-
-            for (int c = 0; c < table.ChunkCount; c++)
-            {
-                // Per-chunk level: distance band, or the fixed level.
-                int req;
-                if (doDistance)
-                {
-                    var aabb = table.Chunks[c].Aabb;
-                    Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
-                    float d = Vector3.Distance(camLocal, closest) * scale * fovScale;
-                    req = d < baseDistance ? 0
-                        : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
-                }
-                else req = Mathf.Clamp(fixedLevel, 0, maxLod);
-
-                // Fall back to the coarsest level actually present in this chunk.
-                int use = req;
-                while (use <= maxLod && table.Chunks[c].Lods[use].Count == 0) use++;
-                if (use > maxLod) { m_selectedLevel[c] = 0xFFFFFFFFu; continue; }
-
-                if (doCull)
-                {
-                    var sp = table.Chunks[c].Sphere;
-                    Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
-                    float wr = sp.w * scale;
-                    bool inside = true;
-                    for (int p = 0; p < 6; p++)
-                        if (m_worldFrustumPlanes[p].GetDistanceToPoint(wc) < -wr) { inside = false; break; }
-                    m_selectedLevel[c] = inside ? (uint)use : 0xFFFFFFFFu;
-                }
-                else m_selectedLevel[c] = (uint)use;
-            }
+            ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
+                baseDistance, multiplier, cull);
             m_selectedLevelBuffer.SetData(m_selectedLevel);
+            bool doCull = cull && camera != null;
 
             SorterResource.Initialized = true;
             m_prevCulled = true;
@@ -333,11 +287,98 @@ namespace Gsplat
             m_bounds = m_gsplatAsset.Bounds;
         }
 
-        public void BindGsplatAsset(GsplatAsset gsplatAsset, bool asyncUpload = false)
+        // Pick one LOD level per chunk into m_selectedLevel (0xFFFFFFFF = culled): FOV-comp
+        // distance bands base*mult^i, or a fixed level; optional bounding-sphere frustum cull.
+        // Shared by the combined-buffer path (InitOrderChunked) and the streaming pool.
+        void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
+            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull)
+        {
+            if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
+                m_selectedLevel = new uint[table.ChunkCount];
+            int maxLod = table.MaxLod;
+            bool doDistance = distanceLod && camera != null && maxLod > 0;
+            bool doCull = cull && camera != null;
+            if (doCull) GeometryUtility.CalculateFrustumPlanes(camera, m_worldFrustumPlanes);
+
+            var ls = matrixWorld.lossyScale;
+            float scale = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
+            Vector3 camLocal = Vector3.zero;
+            float fovScale = 1f, invLogMult = 1f;
+            if (doDistance)
+            {
+                float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+                float tanHalfH = tanHalfV * camera.aspect;
+                fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
+                camLocal = matrixWorld.inverse.MultiplyPoint3x4(camera.transform.position);
+                invLogMult = 1f / Mathf.Log(Mathf.Max(1.0001f, multiplier));
+                baseDistance = Mathf.Max(1e-4f, baseDistance);
+            }
+
+            for (int c = 0; c < table.ChunkCount; c++)
+            {
+                int req;
+                if (doDistance)
+                {
+                    var aabb = table.Chunks[c].Aabb;
+                    Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
+                    float d = Vector3.Distance(camLocal, closest) * scale * fovScale;
+                    req = d < baseDistance ? 0
+                        : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
+                }
+                else req = Mathf.Clamp(fixedLevel, 0, maxLod);
+
+                int use = req;
+                while (use <= maxLod && table.Chunks[c].Lods[use].Count == 0) use++;
+                if (use > maxLod) { m_selectedLevel[c] = 0xFFFFFFFFu; continue; }
+
+                if (doCull)
+                {
+                    var sp = table.Chunks[c].Sphere;
+                    Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
+                    float wr = sp.w * scale;
+                    bool inside = true;
+                    for (int p = 0; p < 6; p++)
+                        if (m_worldFrustumPlanes[p].GetDistanceToPoint(wc) < -wr) { inside = false; break; }
+                    m_selectedLevel[c] = inside ? (uint)use : 0xFFFFFFFFu;
+                }
+                else m_selectedLevel[c] = (uint)use;
+            }
+        }
+
+        // R4 streaming pool: rebuild the visible set on refresh by compacting only the
+        // selected chunk-levels into the budget-sized pool resource (from CPU RAM), then let
+        // the existing depth+sort+draw run over it (RemainingCount = packed count, identity
+        // order). GPU holds ~budget splats instead of the whole combined buffer.
+        public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
+            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull)
+        {
+            // Only rebuild when the visible set can change (camera-move / refresh tick).
+            if (m_remainingCount > 0 && !ComputeCutoutsRequired)
+                return;
+            ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
+                baseDistance, multiplier, cull);
+            uint visible = GsplatChunkPool.Fill((GsplatResourceSpark)GsplatResource,
+                (GsplatAssetSpark)m_gsplatAsset, table, m_selectedLevel, out m_poolOverflow);
+            m_remainingCount = visible;
+            SorterResource.Initialized = false;   // re-fill identity order for the new pool contents
+            m_bounds = m_gsplatAsset.Bounds;
+        }
+
+        public void BindGsplatAsset(GsplatAsset gsplatAsset, bool asyncUpload = false, bool poolMode = false)
         {
             Debug.Assert(m_gsplatAssetID == 0);
             m_gsplatAssetID = gsplatAsset.GetInstanceID();
             m_gsplatAsset = gsplatAsset;
+            m_poolMode = poolMode && gsplatAsset is GsplatAssetSpark;
+            if (m_poolMode)
+            {
+                // Budget-sized owned resource (SplatCount here = the pool capacity the renderer
+                // was created with). No full upload — Fill populates the selected set per frame.
+                m_poolResource = new GsplatResourceSpark(SplatCount, gsplatAsset.SHBands);
+                GsplatResource = m_poolResource;
+                gsplatAsset.SetupMaterialPropertyBlock(m_propertyBlock, GsplatResource);
+                return;
+            }
             GsplatResource = GsplatResourceManager.Get(gsplatAsset);
             gsplatAsset.SetupMaterialPropertyBlock(m_propertyBlock, GsplatResource);
             if (asyncUpload)
@@ -348,10 +389,19 @@ namespace Gsplat
 
         public void ReleaseGsplatAsset()
         {
-            GsplatResourceManager.Release(m_gsplatAssetID);
+            if (m_poolMode)
+            {
+                m_poolResource?.Dispose();
+                m_poolResource = null;
+            }
+            else
+            {
+                GsplatResourceManager.Release(m_gsplatAssetID);
+            }
             GsplatResource = null;
             m_gsplatAsset = null;
             m_gsplatAssetID = 0;
+            m_poolMode = false;
         }
 
         void CreateResources(uint splatCount)

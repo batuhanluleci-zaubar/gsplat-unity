@@ -78,6 +78,15 @@ namespace Gsplat
         [Tooltip("Cull chunks whose bounding sphere is outside the cull camera frustum.")]
         public bool ChunkedCull = true;
 
+        [Tooltip("R4 streaming: keep only a budget of splats GPU-resident. Each refresh, the " +
+                 "selected per-chunk LODs are compacted into a pool from the combined asset's " +
+                 "CPU RAM — GPU holds ~budget instead of the whole 2x-LOD combined buffer.")]
+        public bool ChunkedStreaming = false;
+
+        [Tooltip("Streaming pool capacity in splats (GPU-resident budget).")]
+        [Min(1000)]
+        public int ChunkedPoolBudget = 2_000_000;
+
         [Tooltip("Draw each chunk's AABB in the Scene view, colored by its selected LOD " +
                  "(green=fine .. red=coarse, gray=culled). Play mode only.")]
         public bool ChunkedDebugGizmos = false;
@@ -99,8 +108,13 @@ namespace Gsplat
         GsplatAsset m_prevAsset;
         GsplatRendererImpl m_renderer;
 
+        // Streaming pool mode: budget-resident, populated per frame — only in Play with a
+        // chunk table (needs the asset's CPU arrays; the pool has nothing until the first Fill).
+        bool PoolMode => ChunkedLod && ChunkedStreaming && ChunkTable != null && Application.isPlaying;
+
         public bool Valid => GsplatAsset &&
-                             (RenderBeforeUploadComplete ? SplatCount > 0 : SplatCount == GsplatAsset.SplatCount);
+                             (PoolMode ? m_renderer?.GsplatResource != null
+                                 : (RenderBeforeUploadComplete ? SplatCount > 0 : SplatCount == GsplatAsset.SplatCount));
 
         public uint SplatCount => m_renderer != null ? m_renderer.GsplatResource?.UploadedCount ?? 0 : 0;
 
@@ -255,16 +269,19 @@ namespace Gsplat
                 m_prevAsset = GsplatAsset;
                 if (GsplatAsset)
                 {
+                    // In streaming pool mode the GPU buffers are sized to the budget, not the
+                    // full (2x-LOD) combined asset.
+                    uint cap = PoolMode ? (uint)ChunkedPoolBudget : GsplatAsset.SplatCount;
                     if (m_renderer == null)
-                        m_renderer = new GsplatRendererImpl(GsplatAsset.SplatCount);
+                        m_renderer = new GsplatRendererImpl(cap);
                     else
-                        m_renderer.RecreateResources(GsplatAsset.SplatCount);
+                        m_renderer.RecreateResources(cap);
 #if UNITY_EDITOR
                     var asyncUpload = AsyncUpload && Application.isPlaying;
 #else
                     var asyncUpload = AsyncUpload;
 #endif
-                    m_renderer.BindGsplatAsset(GsplatAsset, asyncUpload);
+                    m_renderer.BindGsplatAsset(GsplatAsset, asyncUpload, PoolMode);
                     GsplatSorter.Instance.MarkGlobalBuffersDirty();
                 }
             }
@@ -276,16 +293,21 @@ namespace Gsplat
                 // making splats vanish while you look through it.
                 var runtimeCam = Application.isPlaying ? (CullCamera != null ? CullCamera : Camera.main) : null;
 
-                if (ChunkedLod && ChunkTable != null && InitOrderChunkedShader != null && Application.isPlaying)
+                if (ChunkedLod && ChunkTable != null && Application.isPlaying)
                 {
                     if (m_chunkTableParsed == null || m_chunkTableSource != ChunkTable)
                     {
                         m_chunkTableParsed = GsplatChunkTable.Parse(ChunkTable.text);
                         m_chunkTableSource = ChunkTable;
                     }
-                    m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
-                        transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                        ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin);
+                    if (PoolMode)
+                        m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
+                            runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
+                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull);
+                    else if (InitOrderChunkedShader != null)
+                        m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
+                            transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
+                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin);
                 }
                 else
                 {

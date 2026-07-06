@@ -5,44 +5,29 @@ using UnityEngine;
 
 namespace Gsplat
 {
-    // R4 residency pool (see docs/CHUNKED_LOD_DESIGN.md §7b). A fixed-capacity set of Spark
-    // GPU buffers that, each refresh, is packed with ONLY the currently-selected per-chunk
-    // LOD intervals — copied straight from the chunked asset's CPU arrays (the combined
-    // .spz stays resident in RAM; only `Capacity` splats live on the GPU). This is the
-    // work-buffer-compaction form of streaming: rebuild the visible set on camera-move
-    // rather than a per-slot allocator. Turns a 19.3M-resident combined buffer into a
-    // ~budget-resident pool.
-    public class GsplatChunkPool
+    // R4 residency pool (see docs/CHUNKED_LOD_DESIGN.md §7b). The chunked-streaming renderer
+    // owns a BUDGET-sized GsplatResourceSpark (a few M splats) instead of uploading the whole
+    // combined asset (e.g. 19.3M). Each refresh, Fill() compacts ONLY the currently-selected
+    // per-chunk LOD intervals into that resource, copied straight from the asset's CPU-resident
+    // combined arrays (the combined .spz stays in RAM; only the budget lives on the GPU). The
+    // existing depth+sort+draw then run over the pool resource unchanged.
+    //
+    // Work-buffer-compaction form of streaming: the visible set is rebuilt on camera-move
+    // rather than via a per-slot allocator.
+    public static class GsplatChunkPool
     {
-        public GraphicsBuffer PackedSplatsBuffer { get; private set; }
-        public GraphicsBuffer PackedSH1Buffer { get; private set; }
-        public GraphicsBuffer PackedSH2Buffer { get; private set; }
-        public GraphicsBuffer PackedSH3Buffer { get; private set; }
-
-        public int Capacity { get; private set; }
-        public uint VisibleCount { get; private set; }   // splats packed by the last Populate
-        public uint OverflowCount { get; private set; }  // splats dropped because Capacity was hit
-
-        readonly byte m_shBands;
-
-        public GsplatChunkPool(int capacity, byte shBands)
+        // Pack selected (chunk,level) intervals into `res` (a budget-sized Spark resource),
+        // contiguously, from the asset's CPU arrays. selectedLevel[c]==0xFFFFFFFF => skip.
+        // Fills up to the resource capacity; the remainder is returned in `overflow` (the
+        // budget/underfill signal). Returns the number of splats packed (the visible count).
+        public static uint Fill(GsplatResourceSpark res, GsplatAssetSpark asset,
+            GsplatChunkTable table, uint[] selectedLevel, out uint overflow)
         {
-            Capacity = Mathf.Max(1, capacity);
-            m_shBands = shBands;
-            PackedSplatsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Capacity, sizeof(uint) * 4);
-            if (shBands >= 1) PackedSH1Buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Capacity, sizeof(uint) * 2);
-            if (shBands >= 2) PackedSH2Buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Capacity, sizeof(uint) * 4);
-            if (shBands >= 3) PackedSH3Buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Capacity, sizeof(uint) * 4);
-        }
-
-        // Compact the selected (chunk, level) intervals into the pool contiguously, copying
-        // from the asset's CPU-resident combined arrays. selectedLevel[c] == 0xFFFFFFFF means
-        // the chunk is culled/absent and is skipped. Fills up to Capacity; the remainder is
-        // counted in OverflowCount (the budget/underfill signal). Sets VisibleCount.
-        public void Populate(GsplatAssetSpark asset, GsplatChunkTable table, uint[] selectedLevel)
-        {
+            int capacity = res.PackedSplatsBuffer.count;
+            byte shBands = asset.SHBands;
             int dst = 0;
-            ulong overflow = 0;
+            ulong over = 0;
+
             for (int c = 0; c < table.ChunkCount; c++)
             {
                 uint lvl = c < selectedLevel.Length ? selectedLevel[c] : 0xFFFFFFFFu;
@@ -51,28 +36,22 @@ namespace Gsplat
                 int cnt = iv.Count;
                 if (cnt <= 0) continue;
 
-                int room = Capacity - dst;
-                if (room <= 0) { overflow += (ulong)cnt; continue; }
+                int room = capacity - dst;
+                if (room <= 0) { over += (ulong)cnt; continue; }
                 int take = cnt <= room ? cnt : room;
-                if (take < cnt) overflow += (ulong)(cnt - take);
+                if (take < cnt) over += (ulong)(cnt - take);
 
-                PackedSplatsBuffer.SetData(asset.PackedSplats, iv.Offset, dst, take);
-                if (PackedSH1Buffer != null) PackedSH1Buffer.SetData(asset.PackedSH1, 2 * iv.Offset, 2 * dst, 2 * take);
-                if (PackedSH2Buffer != null) PackedSH2Buffer.SetData(asset.PackedSH2, 4 * iv.Offset, 4 * dst, 4 * take);
-                if (PackedSH3Buffer != null) PackedSH3Buffer.SetData(asset.PackedSH3, 4 * iv.Offset, 4 * dst, 4 * take);
+                res.PackedSplatsBuffer.SetData(asset.PackedSplats, iv.Offset, dst, take);
+                if (shBands >= 1) res.PackedSH1Buffer.SetData(asset.PackedSH1, 2 * iv.Offset, 2 * dst, 2 * take);
+                if (shBands >= 2) res.PackedSH2Buffer.SetData(asset.PackedSH2, 4 * iv.Offset, 4 * dst, 4 * take);
+                if (shBands >= 3) res.PackedSH3Buffer.SetData(asset.PackedSH3, 4 * iv.Offset, 4 * dst, 4 * take);
 
                 dst += take;
             }
-            VisibleCount = (uint)dst;
-            OverflowCount = (uint)System.Math.Min(overflow, uint.MaxValue);
-        }
 
-        public void Dispose()
-        {
-            PackedSplatsBuffer?.Dispose(); PackedSplatsBuffer = null;
-            PackedSH1Buffer?.Dispose(); PackedSH1Buffer = null;
-            PackedSH2Buffer?.Dispose(); PackedSH2Buffer = null;
-            PackedSH3Buffer?.Dispose(); PackedSH3Buffer = null;
+            res.UploadedCount = (uint)dst;
+            overflow = (uint)System.Math.Min(over, uint.MaxValue);
+            return (uint)dst;
         }
     }
 }
