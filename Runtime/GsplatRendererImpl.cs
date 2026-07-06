@@ -352,8 +352,14 @@ namespace Gsplat
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull)
         {
-            // Rebuild the pool each refresh. (Camera-move gating is a later perf optimization;
-            // re-filling every frame is correct, just extra SetData.)
+            // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
+            // thresholds — the visible set is otherwise unchanged. Uses the same reliable
+            // camera-move check as the frustum path, NOT the ComputeCutoutsRequired gate
+            // (which stuck the selection at the first fill). m_remainingCount==0 forces the
+            // first fill; keep the last cull pose so tiny per-frame jitter doesn't rebuild.
+            if (m_remainingCount > 0 && camera != null && !CameraMovedSinceLastCull(camera))
+                return;
+
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, cull);
             uint visible = GsplatChunkPool.Fill((GsplatResourceSpark)GsplatResource,
@@ -361,6 +367,11 @@ namespace Gsplat
             m_remainingCount = visible;
             SorterResource.Initialized = false;   // re-fill identity order for the new pool contents
             m_bounds = m_gsplatAsset.Bounds;
+            if (camera != null)
+            {
+                m_lastCullCamPos = camera.transform.position;
+                m_lastCullCamRot = camera.transform.eulerAngles;
+            }
         }
 
         public void BindGsplatAsset(GsplatAsset gsplatAsset, bool asyncUpload = false, bool poolMode = false)
