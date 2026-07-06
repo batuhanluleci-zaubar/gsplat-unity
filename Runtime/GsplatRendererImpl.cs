@@ -352,9 +352,8 @@ namespace Gsplat
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull)
         {
-            // Only rebuild when the visible set can change (camera-move / refresh tick).
-            if (m_remainingCount > 0 && !ComputeCutoutsRequired)
-                return;
+            // Rebuild the pool each refresh. (Camera-move gating is a later perf optimization;
+            // re-filling every frame is correct, just extra SetData.)
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, cull);
             uint visible = GsplatChunkPool.Fill((GsplatResourceSpark)GsplatResource,
