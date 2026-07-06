@@ -110,6 +110,8 @@ namespace Gsplat
         // Editor-debug accessors (valid in Play mode when ChunkedLod is active).
         public GsplatChunkTable ChunkedTableRuntime => m_chunkTableParsed;
         public uint[] ChunkedSelectedLevels => m_renderer?.SelectedLevels;
+        // Splats dropped past the pool capacity on the last Fill (0 = the balancer fit budget).
+        public uint ChunkedPoolOverflow => m_renderer?.m_poolOverflow ?? 0;
 
         GsplatAsset m_prevAsset;
         GsplatRendererImpl m_renderer;

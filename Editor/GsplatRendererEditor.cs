@@ -147,6 +147,22 @@ namespace Gsplat.Editor
             float pct = lod0Total > 0 ? 100f * drawn / lod0Total : 0f;
             EditorGUILayout.LabelField($"{table.ChunkCount} chunks   drawn {drawn:N0} splats   ({pct:F1}% of full LOD0)");
 
+            // Streaming pool: show the budget ceiling and whether R3 fit within it.
+            if (r.ChunkedLod && r.ChunkedStreaming)
+            {
+                uint overflow = r.ChunkedPoolOverflow;
+                float used = r.ChunkedPoolBudget > 0 ? 100f * drawn / r.ChunkedPoolBudget : 0f;
+                string bal = r.ChunkedBudgetBalancer ? "balancer ON" : "balancer OFF";
+                if (overflow > 0)
+                    EditorGUILayout.HelpBox(
+                        $"Pool budget {r.ChunkedPoolBudget:N0}  ({bal})  —  OVER by {overflow:N0} splats " +
+                        "dropped past capacity. Raise ChunkedPoolBudget or enable the balancer.",
+                        MessageType.Warning);
+                else
+                    EditorGUILayout.LabelField(
+                        $"Pool budget {r.ChunkedPoolBudget:N0}   using {used:F0}%   ({bal}, fits)");
+            }
+
             for (int L = 0; L <= maxLod; L++)
                 DrawFill((float)perLevel[L] / table.ChunkCount,
                     GsplatRenderer.LodColor(L, maxLod), $"LOD {L}   {perLevel[L]} chunks");

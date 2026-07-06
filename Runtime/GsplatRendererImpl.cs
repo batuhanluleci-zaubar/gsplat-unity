@@ -380,14 +380,16 @@ namespace Gsplat
             return -1;
         }
 
-        // R3 budget balancer. The distance bands in ComputeSelectedLevels pick a per-chunk LOD
-        // for quality but do NOT bound the total; this enforces Σ(selected splat counts) ≤
-        // budget so frame time is stable regardless of view. Degrades the FARTHEST chunks first
-        // (spends the cut where it's least visible) and, when there's headroom, upgrades the
-        // NEAREST first (spends the spare budget where it helps most). Chunks are ordered by a
-        // 64-bucket √-distance counting sort (PlayCanvas parity, GC-free). Modifies
-        // m_selectedLevel in place; returns the final selected total. camera==null → no-op
-        // (no per-chunk distance to order by).
+        // R3 budget balancer. The distance bands in ComputeSelectedLevels already pick each
+        // chunk's ideal LOD for its distance, but nothing bounds the TOTAL. This enforces
+        // Σ(selected splat counts) ≤ budget so frame time is stable regardless of view, by
+        // DEGRADING the farthest chunks first (spend the cut where it's least visible) until it
+        // fits. It is deliberately degrade-only: the budget is a CEILING, not a target — when
+        // the view already fits (e.g. zoomed out) we keep the distance selection and draw fewer
+        // splats rather than upgrading to fill the budget (which would waste GPU for no visible
+        // gain, since the distance LOD is already the finest the view warrants). Chunks are
+        // ordered by a 64-bucket √-distance counting sort (PlayCanvas parity, GC-free).
+        // Modifies m_selectedLevel in place; returns the final selected total.
         int ApplyBudgetBalancer(GsplatChunkTable table, int budget)
         {
             int n = table.ChunkCount;
@@ -424,43 +426,23 @@ namespace Gsplat
                 total += table.Chunks[c].Lods[(int)m_selectedLevel[c]].Count;
             }
 
-            if (total > budget)
+            // Over budget: repeatedly degrade from the far end until we fit (or nothing can
+            // degrade further — budget smaller than every chunk at its coarsest level, in which
+            // case the pool Fill drops the remainder and OverflowCount reports it). Under budget
+            // we do nothing: the distance selection stands.
+            bool changed = true;
+            while (total > budget && changed)
             {
-                // Over budget: repeatedly degrade from the far end until we fit (or nothing can
-                // degrade further — budget smaller than every chunk at its coarsest level).
-                bool changed = true;
-                while (total > budget && changed)
+                changed = false;
+                for (int i = active - 1; i >= 0 && total > budget; i--)
                 {
-                    changed = false;
-                    for (int i = active - 1; i >= 0 && total > budget; i--)
-                    {
-                        int c = m_bucketOrder[i];
-                        int L = (int)m_selectedLevel[c];
-                        int nl = NextPresentLevel(table, c, L, +1);
-                        if (nl < 0) continue;
-                        total -= (long)table.Chunks[c].Lods[L].Count - table.Chunks[c].Lods[nl].Count;
-                        m_selectedLevel[c] = (uint)nl;
-                        changed = true;
-                    }
-                }
-            }
-            else
-            {
-                // Under budget: fill the spare from the near end, one level at a time, taking an
-                // upgrade only while it still fits. Nearest chunks get first claim on the budget.
-                bool changed = true;
-                while (changed)
-                {
-                    changed = false;
-                    for (int i = 0; i < active; i++)
-                    {
-                        int c = m_bucketOrder[i];
-                        int L = (int)m_selectedLevel[c];
-                        int nl = NextPresentLevel(table, c, L, -1);
-                        if (nl < 0) continue;
-                        long cost = (long)table.Chunks[c].Lods[nl].Count - table.Chunks[c].Lods[L].Count;
-                        if (total + cost <= budget) { total += cost; m_selectedLevel[c] = (uint)nl; changed = true; }
-                    }
+                    int c = m_bucketOrder[i];
+                    int L = (int)m_selectedLevel[c];
+                    int nl = NextPresentLevel(table, c, L, +1);
+                    if (nl < 0) continue;
+                    total -= (long)table.Chunks[c].Lods[L].Count - table.Chunks[c].Lods[nl].Count;
+                    m_selectedLevel[c] = (uint)nl;
+                    changed = true;
                 }
             }
             return (int)total;
