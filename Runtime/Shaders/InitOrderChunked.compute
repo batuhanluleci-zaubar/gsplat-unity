@@ -1,0 +1,62 @@
+// Copyright (c) 2026 Zaubar
+// SPDX-License-Identifier: MIT
+//
+// Chunked-LOD visible-set builder. The asset is a single combined PackedSplats
+// buffer holding every LOD level (level 0 = finest, then coarser levels), baked by
+// tools/bake_chunks.py. Each splat carries a packed (chunkId<<4 | level) tag; a
+// per-chunk _SelectedLevel (chosen on the CPU by cull + LOD selection) decides which
+// level of each chunk is drawn this frame. A splat is appended to _OrderBuffer iff
+// its level equals its chunk's selected level (and it survives the frustum test).
+// Culled chunks set _SelectedLevel = 0xFFFFFFFF so none of their splats match.
+
+#define GROUP_SIZE 1024
+
+#pragma kernel InitOrderChunked
+#pragma multi_compile __ FRUSTUM_CULL
+
+uint _SplatCount;                          // combined buffer splat count
+
+AppendStructuredBuffer<uint> _OrderBuffer;
+StructuredBuffer<uint4> _PackedSplatsBuffer;
+StructuredBuffer<uint>  _SplatChunk;       // per-splat: (chunkId << 4) | level (level 0..15)
+StructuredBuffer<uint>  _SelectedLevel;    // per-chunk chosen level; 0xFFFFFFFF = chunk culled
+
+#ifdef FRUSTUM_CULL
+float4 _FrustumPlanes[6];                  // object-space, inward normals, normalized
+float  _CullMargin;
+
+bool InFrustum(float3 pos)
+{
+    [unroll]
+    for (int p = 0; p < 6; ++p)
+        if (dot(_FrustumPlanes[p].xyz, pos) + _FrustumPlanes[p].w < -_CullMargin)
+            return false;
+    return true;
+}
+#endif
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void InitOrderChunked(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    uint packed = _SplatChunk[idx];
+    uint chunkId = packed >> 4u;
+    uint level = packed & 0xFu;
+
+    // Draw only the level currently selected for this chunk (mismatch also covers
+    // culled chunks, whose selected level is 0xFFFFFFFF).
+    if (_SelectedLevel[chunkId] != level)
+        return;
+
+#ifdef FRUSTUM_CULL
+    uint4 ps = _PackedSplatsBuffer[idx];
+    float3 pos = float3(f16tof32(ps.y & 0xFFFFu), f16tof32((ps.y >> 16u) & 0xFFFFu), f16tof32(ps.z & 0xFFFFu));
+    if (!InFrustum(pos))
+        return;
+#endif
+
+    _OrderBuffer.Append(idx);
+}
