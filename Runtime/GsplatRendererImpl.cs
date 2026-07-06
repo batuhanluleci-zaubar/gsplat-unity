@@ -34,6 +34,8 @@ namespace Gsplat
         static readonly int k_shDegree = Shader.PropertyToID("_SHDegree");
         static readonly int k_brightness = Shader.PropertyToID("_Brightness");
         static readonly int k_scaleFactor = Shader.PropertyToID("_ScaleFactor");
+        static readonly int k_frustumPlanes = Shader.PropertyToID("_FrustumPlanes");
+        static readonly int k_cullMargin = Shader.PropertyToID("_CullMargin");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -43,6 +45,12 @@ namespace Gsplat
 
         GsplatCutout.ShaderData[] m_cutoutsData;
         uint m_prevSplatCount;
+
+        // Whether the previous InitOrder dispatch produced a culled subset (cutouts or
+        // frustum). Used to restore the identity draw order when culling is turned off.
+        bool m_prevCulled;
+        readonly Plane[] m_frustumPlanes = new Plane[6];
+        readonly Vector4[] m_frustumPlanesOS = new Vector4[6];
 
         public GsplatRendererImpl(uint splatCount)
         {
@@ -90,12 +98,20 @@ namespace Gsplat
             return count[0];
         }
 
-        public void DispatchInitOrder(GsplatCutout[] cutouts, Matrix4x4 matrixWorld, bool cutoutsUpdateBounds)
+        public void DispatchInitOrder(GsplatCutout[] cutouts, Matrix4x4 matrixWorld, bool cutoutsUpdateBounds,
+            Camera cullCamera = null, float cullMargin = 0f)
         {
-            if (cutouts.Length == 0)
+            bool frustum = cullCamera != null;
+
+            // No per-splat filtering at all: draw the whole asset with an identity order.
+            if (cutouts.Length == 0 && !frustum)
             {
-                if (m_cutoutsData.Length > 0)
+                // Restore the identity draw order if the previous frame produced a culled subset.
+                if (m_prevCulled)
+                {
                     SorterResource.Initialized = false;
+                    m_prevCulled = false;
+                }
                 m_cutoutsData = Array.Empty<GsplatCutout.ShaderData>();
                 m_remainingCount = GsplatResource.UploadedCount;
                 m_bounds = m_gsplatAsset.Bounds;
@@ -118,17 +134,55 @@ namespace Gsplat
                         cutoutsUnchanged = false;
             }
 
-            if (cutoutsUnchanged && m_prevSplatCount == GsplatResource.UploadedCount)
+            // With frustum culling the visible set depends on the camera, so never skip on
+            // unchanged cutouts — ComputeCutoutsRequired already gates this to camera-move /
+            // refresh-rate ticks (see RefreshOnCameraMove).
+            if (!frustum && cutoutsUnchanged && m_prevSplatCount == GsplatResource.UploadedCount)
                 return;
 
             m_prevSplatCount = GsplatResource.UploadedCount;
             m_cutoutsData = updatedCutoutsData;
             CutoutsBuffer = m_gsplatAsset.UpdateCutoutsBuffer(CutoutsBuffer, m_cutoutsData);
+
+            // Same ComputeShader instance the asset's InitOrder will dispatch (per-asset,
+            // selected by compression via GsplatSettings). Set frustum state on it first.
+            var cs = m_gsplatAsset.GsplatMaterial.InitOrderShader;
+            if (frustum)
+            {
+                BuildObjectSpaceFrustumPlanes(cullCamera, matrixWorld);
+                cs.EnableKeyword("FRUSTUM_CULL");
+                cs.SetVectorArray(k_frustumPlanes, m_frustumPlanesOS);
+                cs.SetFloat(k_cullMargin, cullMargin);
+            }
+            else
+            {
+                cs.DisableKeyword("FRUSTUM_CULL");
+            }
+
             if (cutoutsUpdateBounds)
                 m_gsplatAsset.UpdateBoundsBuffer(BoundsBuffer);
             m_gsplatAsset.InitOrder(SorterResource, GsplatResource, cutoutsUpdateBounds);
             m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
             m_bounds = cutoutsUpdateBounds ? ExtractBounds() : m_gsplatAsset.Bounds;
+            m_prevCulled = true;
+        }
+
+        // Builds the 6 camera frustum planes in the asset's object space (inward normals,
+        // xyz normalized so _CullMargin is metric). For an object point x, world = M·x, so a
+        // world plane P satisfies P·(M·x) = (Mᵀ·P)·x — hence the transpose pull-back.
+        void BuildObjectSpaceFrustumPlanes(Camera cam, Matrix4x4 localToWorld)
+        {
+            GeometryUtility.CalculateFrustumPlanes(cam, m_frustumPlanes);
+            Matrix4x4 mt = localToWorld.transpose;
+            for (int i = 0; i < 6; i++)
+            {
+                Plane pl = m_frustumPlanes[i];
+                Vector4 pw = new Vector4(pl.normal.x, pl.normal.y, pl.normal.z, pl.distance);
+                Vector4 po = mt * pw;
+                float n = new Vector3(po.x, po.y, po.z).magnitude;
+                if (n > 1e-8f) po /= n;
+                m_frustumPlanesOS[i] = po;
+            }
         }
 
         public void BindGsplatAsset(GsplatAsset gsplatAsset, bool asyncUpload = false)

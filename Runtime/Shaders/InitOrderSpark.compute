@@ -6,6 +6,7 @@
 #pragma kernel InitOrder
 
 #pragma multi_compile __ UPDATE_BOUNDS
+#pragma multi_compile __ FRUSTUM_CULL
 
 uint _SplatCount;
 
@@ -39,6 +40,11 @@ void InitOrder(uint3 id : SV_DispatchThreadID)
     uint word2 = packedSplat.z;
 
     float3 splatPos = float3(f16tof32(word1 & 0xFFFFU), f16tof32((word1 >> 16u) & 0xFFFFU), f16tof32(word2 & 0xFFFFU));
+
+#ifdef FRUSTUM_CULL
+    if (!InFrustum(splatPos))
+        return;
+#endif
 
     if (!IsSplatCut(splatPos))
     {

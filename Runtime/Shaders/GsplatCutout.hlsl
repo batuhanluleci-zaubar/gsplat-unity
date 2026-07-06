@@ -13,6 +13,23 @@ uint FloatToSortableUint(float f)
     return fu ^ mask;
 }
 
+#ifdef FRUSTUM_CULL
+// Object-space frustum planes (inward normals, xyz normalized) plus an object-space
+// padding for the splat radius so gaussians straddling a plane are not popped.
+// Filled on the CPU from the camera frustum transformed by transpose(localToWorld).
+float4 _FrustumPlanes[6];
+float _CullMargin;
+
+bool InFrustum(float3 pos)
+{
+    [unroll]
+    for (int p = 0; p < 6; ++p)
+        if (dot(_FrustumPlanes[p].xyz, pos) + _FrustumPlanes[p].w < -_CullMargin)
+            return false;
+    return true;
+}
+#endif
+
 bool IsSplatCut(float3 pos)
 {
     bool finalCut = false;

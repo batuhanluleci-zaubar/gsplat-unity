@@ -37,6 +37,19 @@ namespace Gsplat
         [Tooltip("Does cutouts update the Gsplat world bounds? (Costly on moving cutouts)")]
         public bool CutoutsUpdateBounds = true;
 
+        [Header("Frustum Culling")]
+        [Tooltip("Skip splats outside the camera frustum in the InitOrder pass, reducing the " +
+                 "sorted/drawn count (tris & verts). Recomputed on camera movement.")]
+        public bool FrustumCulling = false;
+
+        [Tooltip("Camera to cull against. Falls back to Camera.main when empty.")]
+        public Camera CullCamera;
+
+        [Tooltip("Object-space padding (~max splat radius) added to every frustum plane so " +
+                 "gaussians straddling an edge are not popped.")]
+        [Min(0f)]
+        public float FrustumCullMargin = 0.5f;
+
         GsplatAsset m_prevAsset;
         GsplatRendererImpl m_renderer;
 
@@ -162,7 +175,13 @@ namespace Gsplat
             if (Valid && GsplatSettings.Instance.Valid && GsplatSorter.Instance.Valid)
             {
                 m_renderer.EvaluateRefreshRequired(SortMode, SortRefreshRate - 1, CutoutsRefreshRate - 1);
-                m_renderer.DispatchInitOrder(Cutouts, transform.localToWorldMatrix, CutoutsUpdateBounds);
+                // Only cull at runtime: in edit mode Camera.main would cull the Scene view too,
+                // making splats vanish while you look through it.
+                var cullCamera = (FrustumCulling && Application.isPlaying)
+                    ? (CullCamera != null ? CullCamera : Camera.main)
+                    : null;
+                m_renderer.DispatchInitOrder(Cutouts, transform.localToWorldMatrix, CutoutsUpdateBounds,
+                    cullCamera, FrustumCullMargin);
                 // When the global sorter has merged all renderers into a single draw call,
                 // skip the per-renderer draw — GsplatSorter.DrawAll handles rendering.
                 if (!GsplatSorter.Instance.GlobalRenderEnabled)
