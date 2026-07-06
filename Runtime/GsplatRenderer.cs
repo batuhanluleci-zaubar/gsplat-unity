@@ -59,7 +59,19 @@ namespace Gsplat
         [Tooltip("The .chunks.json sidecar (TextAsset) matching the combined GsplatAsset.")]
         public TextAsset ChunkTable;
 
-        [Tooltip("R1: fixed global LOD level drawn for every visible chunk (0 = finest).")]
+        [Tooltip("Pick each chunk's LOD by FOV-compensated distance to its AABB (bands " +
+                 "base*mult^i). Off = draw the fixed level below for every chunk (debug).")]
+        public bool ChunkedDistanceLod = true;
+
+        [Tooltip("Distance (world units) within which a chunk draws its finest level (LOD0).")]
+        [Min(0.01f)]
+        public float ChunkedLodBaseDistance = 5f;
+
+        [Tooltip("Each successive LOD band is this many times farther (PlayCanvas default 3).")]
+        [Min(1.01f)]
+        public float ChunkedLodMultiplier = 3f;
+
+        [Tooltip("Fixed global LOD level when distance LOD is off (0 = finest).")]
         [Min(0)]
         public int ChunkedFixedLevel = 0;
 
@@ -210,8 +222,8 @@ namespace Gsplat
                         m_chunkTableSource = ChunkTable;
                     }
                     m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
-                        transform.localToWorldMatrix, ChunkedFixedLevel, ChunkedCull,
-                        ChunkedCull ? runtimeCam : null, FrustumCullMargin);
+                        transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
+                        ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin);
                 }
                 else
                 {

@@ -238,25 +238,54 @@ namespace Gsplat
                 Mathf.Max(1, table.ChunkCount), sizeof(uint));
         }
 
-        // Chunked-LOD visible-set build: choose one LOD level per chunk (R1: a fixed global
-        // level, optionally sphere-culled against the camera frustum), upload the per-chunk
-        // selection, then dispatch InitOrderChunked over the combined buffer. Reuses the
-        // existing depth+sort+draw on the resulting OrderBuffer/RemainingCount.
+        // Chunked-LOD visible-set build: choose one LOD level per chunk — by FOV-compensated
+        // distance from the camera to each chunk's AABB (PlayCanvas evaluateNodeLods bands
+        // base*mult^i), or a fixed global level for debugging — optionally frustum-culling
+        // chunks by their bounding sphere. Uploads the per-chunk selection, then dispatches
+        // InitOrderChunked over the combined buffer; reuses existing depth+sort+draw.
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
-            int fixedLevel, bool cull, Camera cullCamera, float cullMargin)
+            Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
+            bool cull, float cullMargin)
         {
             EnsureChunkSetup(table);
             int maxLod = table.MaxLod;
-            int req = Mathf.Clamp(fixedLevel, 0, maxLod);
 
-            bool doCull = cull && cullCamera != null;
-            if (doCull) GeometryUtility.CalculateFrustumPlanes(cullCamera, m_worldFrustumPlanes);
+            bool doDistance = distanceLod && camera != null && maxLod > 0;
+            bool doCull = cull && camera != null;
+            if (doCull) GeometryUtility.CalculateFrustumPlanes(camera, m_worldFrustumPlanes);
+
             var ls = matrixWorld.lossyScale;
             float scale = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
 
+            // FOV compensation: reference is a 45° vertical FOV (tan 22.5°); use the smaller of
+            // vertical/horizontal half-fov so wide and tall framings both behave. (PlayCanvas.)
+            Vector3 camLocal = Vector3.zero;
+            float fovScale = 1f, invLogMult = 1f;
+            if (doDistance)
+            {
+                float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+                float tanHalfH = tanHalfV * camera.aspect;
+                fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
+                camLocal = matrixWorld.inverse.MultiplyPoint3x4(camera.transform.position);
+                invLogMult = 1f / Mathf.Log(Mathf.Max(1.0001f, multiplier));
+                baseDistance = Mathf.Max(1e-4f, baseDistance);
+            }
+
             for (int c = 0; c < table.ChunkCount; c++)
             {
-                // Requested level, falling back to the coarsest present level for this chunk.
+                // Per-chunk level: distance band, or the fixed level.
+                int req;
+                if (doDistance)
+                {
+                    var aabb = table.Chunks[c].Aabb;
+                    Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
+                    float d = Vector3.Distance(camLocal, closest) * scale * fovScale;
+                    req = d < baseDistance ? 0
+                        : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
+                }
+                else req = Mathf.Clamp(fixedLevel, 0, maxLod);
+
+                // Fall back to the coarsest level actually present in this chunk.
                 int use = req;
                 while (use <= maxLod && table.Chunks[c].Lods[use].Count == 0) use++;
                 if (use > maxLod) { m_selectedLevel[c] = 0xFFFFFFFFu; continue; }
@@ -287,9 +316,9 @@ namespace Gsplat
             cs.SetBuffer(kernel, k_splatChunkBuffer, m_splatChunkBuffer);
             cs.SetBuffer(kernel, k_selectedLevelBuffer, m_selectedLevelBuffer);
 
-            if (cullCamera != null)
+            if (doCull)
             {
-                BuildObjectSpaceFrustumPlanes(cullCamera, matrixWorld);
+                BuildObjectSpaceFrustumPlanes(camera, matrixWorld);
                 cs.EnableKeyword("FRUSTUM_CULL");
                 cs.SetVectorArray(k_frustumPlanes, m_frustumPlanesOS);
                 cs.SetFloat(k_cullMargin, cullMargin);
