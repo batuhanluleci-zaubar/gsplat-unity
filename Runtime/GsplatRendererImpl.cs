@@ -69,6 +69,16 @@ namespace Gsplat
         uint[] m_selectedLevel;
         readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
+        // R3 budget-balancer scratch (see ApplyBudgetBalancer). Per-chunk camera distance +
+        // a 64-bucket √-distance counting-sort order (near-first), all reused to stay GC-free.
+        float[] m_chunkDist;                    // per-chunk closest-AABB distance to the camera
+        int[] m_chunkBucket;                    // per-chunk √-distance bucket (−1 = culled)
+        int[] m_bucketOrder;                    // chunk indices, near bucket first
+        readonly int[] m_bucketCount = new int[64];
+        readonly int[] m_bucketStart = new int[64];
+        readonly int[] m_bucketCursor = new int[64];
+        public int m_lastBalancedTotal;         // Σ selected splats after the balancer (diagnostic)
+
         // R4 streaming-pool state: an owned budget-sized resource populated per refresh.
         GsplatResourceSpark m_poolResource;
         bool m_poolMode;
@@ -295,6 +305,12 @@ namespace Gsplat
         {
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
                 m_selectedLevel = new uint[table.ChunkCount];
+            if (m_chunkDist == null || m_chunkDist.Length != table.ChunkCount)
+            {
+                m_chunkDist = new float[table.ChunkCount];
+                m_chunkBucket = new int[table.ChunkCount];
+                m_bucketOrder = new int[table.ChunkCount];
+            }
             int maxLod = table.MaxLod;
             bool doDistance = distanceLod && camera != null && maxLod > 0;
             bool doCull = cull && camera != null;
@@ -302,26 +318,35 @@ namespace Gsplat
 
             var ls = matrixWorld.lossyScale;
             float scale = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
-            Vector3 camLocal = Vector3.zero;
+            bool haveCam = camera != null;
+            // camLocal is needed for both the distance bands AND the balancer's √-distance
+            // buckets, so compute it whenever there is a camera (not only in distance mode).
+            Vector3 camLocal = haveCam
+                ? matrixWorld.inverse.MultiplyPoint3x4(camera.transform.position) : Vector3.zero;
             float fovScale = 1f, invLogMult = 1f;
             if (doDistance)
             {
                 float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
                 float tanHalfH = tanHalfV * camera.aspect;
                 fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
-                camLocal = matrixWorld.inverse.MultiplyPoint3x4(camera.transform.position);
                 invLogMult = 1f / Mathf.Log(Mathf.Max(1.0001f, multiplier));
                 baseDistance = Mathf.Max(1e-4f, baseDistance);
             }
 
             for (int c = 0; c < table.ChunkCount; c++)
             {
+                var aabb = table.Chunks[c].Aabb;
+                float distRaw = 0f;
+                if (haveCam)
+                {
+                    Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
+                    distRaw = Vector3.Distance(camLocal, closest) * scale;
+                    m_chunkDist[c] = distRaw;
+                }
                 int req;
                 if (doDistance)
                 {
-                    var aabb = table.Chunks[c].Aabb;
-                    Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
-                    float d = Vector3.Distance(camLocal, closest) * scale * fovScale;
+                    float d = distRaw * fovScale;
                     req = d < baseDistance ? 0
                         : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
                 }
@@ -345,12 +370,109 @@ namespace Gsplat
             }
         }
 
+        // Nearest populated level from `level` in direction `dir` (+1 = coarser/higher index,
+        // −1 = finer/lower index), skipping absent levels (Count==0); −1 if none exists.
+        static int NextPresentLevel(GsplatChunkTable table, int c, int level, int dir)
+        {
+            var lods = table.Chunks[c].Lods;
+            for (int l = level + dir; l >= 0 && l <= table.MaxLod; l += dir)
+                if (lods[l].Count > 0) return l;
+            return -1;
+        }
+
+        // R3 budget balancer. The distance bands in ComputeSelectedLevels pick a per-chunk LOD
+        // for quality but do NOT bound the total; this enforces Σ(selected splat counts) ≤
+        // budget so frame time is stable regardless of view. Degrades the FARTHEST chunks first
+        // (spends the cut where it's least visible) and, when there's headroom, upgrades the
+        // NEAREST first (spends the spare budget where it helps most). Chunks are ordered by a
+        // 64-bucket √-distance counting sort (PlayCanvas parity, GC-free). Modifies
+        // m_selectedLevel in place; returns the final selected total. camera==null → no-op
+        // (no per-chunk distance to order by).
+        int ApplyBudgetBalancer(GsplatChunkTable table, int budget)
+        {
+            int n = table.ChunkCount;
+            const int B = 64;
+
+            // Max active-chunk distance → normalize √-distance into [0,B).
+            float maxDist = 0f;
+            for (int c = 0; c < n; c++)
+                if (m_selectedLevel[c] != 0xFFFFFFFFu && m_chunkDist[c] > maxDist) maxDist = m_chunkDist[c];
+            float sqrtMax = Mathf.Sqrt(Mathf.Max(1e-6f, maxDist));
+
+            // Counting sort active chunks into 64 √-distance buckets, near (0) → far (B−1).
+            for (int b = 0; b < B; b++) m_bucketCount[b] = 0;
+            for (int c = 0; c < n; c++)
+            {
+                if (m_selectedLevel[c] == 0xFFFFFFFFu) { m_chunkBucket[c] = -1; continue; }
+                int bi = Mathf.Clamp((int)(Mathf.Sqrt(m_chunkDist[c]) / sqrtMax * B), 0, B - 1);
+                m_chunkBucket[c] = bi;
+                m_bucketCount[bi]++;
+            }
+            int acc = 0;
+            for (int b = 0; b < B; b++) { m_bucketStart[b] = acc; m_bucketCursor[b] = acc; acc += m_bucketCount[b]; }
+            int active = acc;
+            for (int c = 0; c < n; c++)
+            {
+                int bi = m_chunkBucket[c];
+                if (bi >= 0) m_bucketOrder[m_bucketCursor[bi]++] = c;
+            }
+
+            long total = 0;
+            for (int i = 0; i < active; i++)
+            {
+                int c = m_bucketOrder[i];
+                total += table.Chunks[c].Lods[(int)m_selectedLevel[c]].Count;
+            }
+
+            if (total > budget)
+            {
+                // Over budget: repeatedly degrade from the far end until we fit (or nothing can
+                // degrade further — budget smaller than every chunk at its coarsest level).
+                bool changed = true;
+                while (total > budget && changed)
+                {
+                    changed = false;
+                    for (int i = active - 1; i >= 0 && total > budget; i--)
+                    {
+                        int c = m_bucketOrder[i];
+                        int L = (int)m_selectedLevel[c];
+                        int nl = NextPresentLevel(table, c, L, +1);
+                        if (nl < 0) continue;
+                        total -= (long)table.Chunks[c].Lods[L].Count - table.Chunks[c].Lods[nl].Count;
+                        m_selectedLevel[c] = (uint)nl;
+                        changed = true;
+                    }
+                }
+            }
+            else
+            {
+                // Under budget: fill the spare from the near end, one level at a time, taking an
+                // upgrade only while it still fits. Nearest chunks get first claim on the budget.
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    for (int i = 0; i < active; i++)
+                    {
+                        int c = m_bucketOrder[i];
+                        int L = (int)m_selectedLevel[c];
+                        int nl = NextPresentLevel(table, c, L, -1);
+                        if (nl < 0) continue;
+                        long cost = (long)table.Chunks[c].Lods[nl].Count - table.Chunks[c].Lods[L].Count;
+                        if (total + cost <= budget) { total += cost; m_selectedLevel[c] = (uint)nl; changed = true; }
+                    }
+                }
+            }
+            return (int)total;
+        }
+
         // R4 streaming pool: rebuild the visible set on refresh by compacting only the
         // selected chunk-levels into the budget-sized pool resource (from CPU RAM), then let
         // the existing depth+sort+draw run over it (RemainingCount = packed count, identity
         // order). GPU holds ~budget splats instead of the whole combined buffer.
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
-            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull)
+            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
+            bool budgetBalance)
         {
             // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
             // thresholds — the visible set is otherwise unchanged. Uses the same reliable
@@ -362,6 +484,10 @@ namespace Gsplat
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, cull);
+            // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
+            // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
+            m_lastBalancedTotal = (budgetBalance && camera != null)
+                ? ApplyBudgetBalancer(table, (int)SplatCount) : 0;
             uint visible = GsplatChunkPool.Fill((GsplatResourceSpark)GsplatResource,
                 (GsplatAssetSpark)m_gsplatAsset, table, m_selectedLevel, out m_poolOverflow);
             m_remainingCount = visible;

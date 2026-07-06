@@ -87,6 +87,12 @@ namespace Gsplat
         [Min(1000)]
         public int ChunkedPoolBudget = 2_000_000;
 
+        [Tooltip("R3 budget balancer: fit the per-chunk LOD selection into ChunkedPoolBudget by " +
+                 "degrading the farthest chunks first (and upgrading the nearest when there is " +
+                 "headroom), so the drawn splat total is bounded for stable frame time. " +
+                 "Streaming-pool only.")]
+        public bool ChunkedBudgetBalancer = true;
+
         [Tooltip("Draw each chunk's AABB in the Scene view, colored by its selected LOD " +
                  "(green=fine .. red=coarse, gray=culled). Play mode only.")]
         public bool ChunkedDebugGizmos = false;
@@ -303,7 +309,8 @@ namespace Gsplat
                     if (PoolMode)
                         m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull);
+                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull,
+                            ChunkedBudgetBalancer);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
