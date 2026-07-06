@@ -79,6 +79,16 @@ namespace Gsplat
         readonly int[] m_bucketCursor = new int[64];
         public int m_lastBalancedTotal;         // Σ selected splats after the balancer (diagnostic)
 
+        // PlayCanvas Stage-A budget corrector (gsplat-world.js _enforceBudget): when the view's
+        // DEMAND (Σ band-level counts) exceeds the budget, shrink the distance bands
+        // (effectiveBase = base·scale, effectiveMult = max(1.2, mult·scale^-0.2)) so FAR chunks
+        // slide to coarser LODs geometrically while the nearest stay in the fine bands. Without
+        // this, the bucket balancer's one-level-per-pass sweep robs the NEAREST chunk of LOD0
+        // before far chunks give up their second level (point-blank walls turned to mush).
+        // Clamped to ≤1: the budget stays a CEILING — under budget the scale only recovers to 1
+        // (distance-ideal), it never upgrades past it. Converges over a few frames (blend 0.3).
+        public float m_budgetScale = 1f;
+
         // R4 streaming-pool state: an owned budget-sized resource populated per refresh.
         GsplatResourceSpark m_poolResource;
         bool m_poolMode;
@@ -267,7 +277,7 @@ namespace Gsplat
         {
             EnsureChunkSetup(table);
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, hysteresis, hyst);
+                baseDistance, multiplier, cull, cullMargin, splatBudget > 0, hysteresis, hyst);
             // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
             // LODs in a compact scene; the budget balancer is what forces the full ladder into
             // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
@@ -317,8 +327,9 @@ namespace Gsplat
         // still poke into view; the margin also adds hysteresis against edge flicker.
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            float cullMargin, bool hysteresis, float hyst)
+            float cullMargin, bool budgetBands, bool hysteresis, float hyst)
         {
+            if (!budgetBands) m_budgetScale = 1f;   // corrector only lives while a budget is active
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
             {
                 m_selectedLevel = new uint[table.ChunkCount];
@@ -348,6 +359,14 @@ namespace Gsplat
                 float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
                 float tanHalfH = tanHalfV * camera.aspect;
                 fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
+                if (budgetBands)
+                {
+                    // Stage-A: over-budget demand shrinks the bands (m_budgetScale < 1) so far
+                    // chunks coarsen geometrically; the hysteresis band check below uses the
+                    // same effective values. (PlayCanvas evaluateOptimalLods parity.)
+                    baseDistance *= m_budgetScale;
+                    multiplier = Mathf.Max(1.2f, multiplier * Mathf.Pow(m_budgetScale, -0.2f));
+                }
                 invLogMult = 1f / Mathf.Log(Mathf.Max(1.0001f, multiplier));
                 baseDistance = Mathf.Max(1e-4f, baseDistance);
             }
@@ -470,6 +489,18 @@ namespace Gsplat
                 total += table.Chunks[c].Lods[(int)m_selectedLevel[c]].Count;
             }
 
+            // Stage-A update for NEXT frame (PlayCanvas _enforceBudget: dead-zone 0.4, blend 0.3,
+            // 1/√ratio): this frame's demand steers the band scale so future selections land
+            // near the budget on their own and the degrade sweep below only trims a small
+            // residual — instead of robbing the nearest chunks of their fine LODs every frame.
+            float ratio = (float)total / budget;
+            if (ratio > 1.4f || ratio < 0.6f)
+            {
+                float inv = 1f / Mathf.Sqrt(ratio);
+                m_budgetScale *= 1f + (inv - 1f) * 0.3f;
+                m_budgetScale = Mathf.Clamp(m_budgetScale, 0.01f, 1f);  // ≤1: ceiling, never upgrade
+            }
+
             // Over budget: repeatedly degrade from the far end until we fit (or nothing can
             // degrade further — budget smaller than every chunk at its coarsest level, in which
             // case the pool Fill drops the remainder and OverflowCount reports it). Under budget
@@ -509,7 +540,7 @@ namespace Gsplat
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, hysteresis, hyst);
+                baseDistance, multiplier, cull, cullMargin, budgetBalance, hysteresis, hyst);
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)
