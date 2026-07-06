@@ -263,11 +263,11 @@ namespace Gsplat
         // InitOrderChunked over the combined buffer; reuses existing depth+sort+draw.
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
-            bool cull, float cullMargin, int splatBudget)
+            bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst)
         {
             EnsureChunkSetup(table);
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin);
+                baseDistance, multiplier, cull, cullMargin, hysteresis, hyst);
             // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
             // LODs in a compact scene; the budget balancer is what forces the full ladder into
             // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
@@ -317,10 +317,13 @@ namespace Gsplat
         // still poke into view; the margin also adds hysteresis against edge flicker.
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            float cullMargin)
+            float cullMargin, bool hysteresis, float hyst)
         {
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
+            {
                 m_selectedLevel = new uint[table.ChunkCount];
+                for (int i = 0; i < m_selectedLevel.Length; i++) m_selectedLevel[i] = 0xFFFFFFFFu;
+            }
             if (m_chunkDist == null || m_chunkDist.Length != table.ChunkCount)
             {
                 m_chunkDist = new float[table.ChunkCount];
@@ -351,20 +354,31 @@ namespace Gsplat
 
             for (int c = 0; c < table.ChunkCount; c++)
             {
+                uint prev = m_selectedLevel[c];   // last frame's decision (0xFFFFFFFF = was culled)
                 var aabb = table.Chunks[c].Aabb;
-                float distRaw = 0f;
+                float distRaw = 0f, d = 0f;
                 if (haveCam)
                 {
                     Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
                     distRaw = Vector3.Distance(camLocal, closest) * scale;
                     m_chunkDist[c] = distRaw;
+                    d = distRaw * fovScale;
                 }
                 int req;
                 if (doDistance)
                 {
-                    float d = distRaw * fovScale;
                     req = d < baseDistance ? 0
                         : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
+                    // LOD hysteresis: while d stays inside the PREVIOUS level's band widened by
+                    // ±hyst, keep that level — a small camera move near a band boundary won't
+                    // flip the LOD back and forth.
+                    if (hysteresis && prev <= (uint)maxLod)
+                    {
+                        int pl = (int)prev;
+                        float bandLo = pl == 0 ? 0f : baseDistance * Mathf.Pow(multiplier, pl - 1);
+                        float bandHi = baseDistance * Mathf.Pow(multiplier, pl);
+                        if (d >= bandLo * (1f - hyst) && d < bandHi * (1f + hyst)) req = pl;
+                    }
                 }
                 else req = Mathf.Clamp(fixedLevel, 0, maxLod);
 
@@ -377,9 +391,18 @@ namespace Gsplat
                     var sp = table.Chunks[c].Sphere;
                     Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
                     float wr = sp.w * scale + cullMargin;   // keep edge chunks (see method note)
-                    bool inside = true;
+                    float minSlack = float.MaxValue;        // >=0 => sphere intersects the frustum
                     for (int p = 0; p < 6; p++)
-                        if (m_worldFrustumPlanes[p].GetDistanceToPoint(wc) < -wr) { inside = false; break; }
+                        minSlack = Mathf.Min(minSlack, m_worldFrustumPlanes[p].GetDistanceToPoint(wc) + wr);
+                    bool inside = minSlack >= 0f;
+                    if (hysteresis)
+                    {
+                        // ±hyst·wr deadband around the frustum boundary: a visible chunk stays
+                        // visible until clearly outside; a culled chunk re-enters only when
+                        // clearly inside — no pop-in/out flicker as the camera jitters at the edge.
+                        float hm = hyst * wr;
+                        inside = prev != 0xFFFFFFFFu ? minSlack >= -hm : minSlack >= hm;
+                    }
                     m_selectedLevel[c] = inside ? (uint)use : 0xFFFFFFFFu;
                 }
                 else m_selectedLevel[c] = (uint)use;
@@ -470,7 +493,7 @@ namespace Gsplat
         // order). GPU holds ~budget splats instead of the whole combined buffer.
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            bool budgetBalance, float cullMargin)
+            bool budgetBalance, float cullMargin, bool hysteresis, float hyst)
         {
             // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
             // thresholds — the visible set is otherwise unchanged. Uses the same reliable
@@ -481,7 +504,7 @@ namespace Gsplat
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin);
+                baseDistance, multiplier, cull, cullMargin, hysteresis, hyst);
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)

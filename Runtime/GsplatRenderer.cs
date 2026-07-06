@@ -93,6 +93,18 @@ namespace Gsplat
                  "Streaming-pool only.")]
         public bool ChunkedBudgetBalancer = true;
 
+        [Tooltip("Damp LOD-band and cull-edge flicker: keep a chunk's previous LOD while the " +
+                 "camera distance stays within its band widened by ±Chunked Hysteresis, and keep " +
+                 "a visible chunk visible until its bounding sphere is clearly outside the frustum " +
+                 "(and vice-versa). Costs one extra per-chunk comparison; off by default.")]
+        public bool ChunkedLodHysteresis = false;
+
+        [Tooltip("Hysteresis dead-band as a fraction (0.15 = 15%). Widens each LOD band and the " +
+                 "cull boundary by this fraction so small camera jitter near a boundary doesn't " +
+                 "flip the decision. Only used when Chunked Lod Hysteresis is on.")]
+        [Range(0f, 0.5f)]
+        public float ChunkedHysteresis = 0.15f;
+
         [Tooltip("Combined-path drawn-splat budget (PlayCanvas splatBudget). The distance bands " +
                  "alone only reach a few LODs in a compact scene; this degrades the farthest " +
                  "chunks toward the coarsest LOD until the drawn total fits, so the FULL LOD " +
@@ -321,12 +333,13 @@ namespace Gsplat
                         m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull,
-                            ChunkedBudgetBalancer, FrustumCullMargin);
+                            ChunkedBudgetBalancer, FrustumCullMargin,
+                            ChunkedLodHysteresis, ChunkedHysteresis);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin,
-                            ChunkedSplatBudget);
+                            ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis);
                 }
                 else
                 {
