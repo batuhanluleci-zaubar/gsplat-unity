@@ -267,7 +267,7 @@ namespace Gsplat
         {
             EnsureChunkSetup(table);
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull);
+                baseDistance, multiplier, cull, cullMargin);
             m_selectedLevelBuffer.SetData(m_selectedLevel);
             bool doCull = cull && camera != null;
 
@@ -300,8 +300,13 @@ namespace Gsplat
         // Pick one LOD level per chunk into m_selectedLevel (0xFFFFFFFF = culled): FOV-comp
         // distance bands base*mult^i, or a fixed level; optional bounding-sphere frustum cull.
         // Shared by the combined-buffer path (InitOrderChunked) and the streaming pool.
+        // cullMargin (metres) widens the frustum for the per-chunk test so a chunk at the screen
+        // edge isn't popped while its splats are still visible — the bounding sphere covers only
+        // splat CENTRES, and splats have extent, so a splat whose centre is just outside can
+        // still poke into view; the margin also adds hysteresis against edge flicker.
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
-            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull)
+            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
+            float cullMargin)
         {
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
                 m_selectedLevel = new uint[table.ChunkCount];
@@ -360,7 +365,7 @@ namespace Gsplat
                 {
                     var sp = table.Chunks[c].Sphere;
                     Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
-                    float wr = sp.w * scale;
+                    float wr = sp.w * scale + cullMargin;   // keep edge chunks (see method note)
                     bool inside = true;
                     for (int p = 0; p < 6; p++)
                         if (m_worldFrustumPlanes[p].GetDistanceToPoint(wc) < -wr) { inside = false; break; }
@@ -454,7 +459,7 @@ namespace Gsplat
         // order). GPU holds ~budget splats instead of the whole combined buffer.
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            bool budgetBalance)
+            bool budgetBalance, float cullMargin)
         {
             // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
             // thresholds — the visible set is otherwise unchanged. Uses the same reliable
@@ -465,7 +470,7 @@ namespace Gsplat
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull);
+                baseDistance, multiplier, cull, cullMargin);
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)

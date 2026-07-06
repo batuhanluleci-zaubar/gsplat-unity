@@ -312,7 +312,7 @@ namespace Gsplat
                         m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull,
-                            ChunkedBudgetBalancer);
+                            ChunkedBudgetBalancer, FrustumCullMargin);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
