@@ -52,6 +52,13 @@ namespace Gsplat
         readonly Plane[] m_frustumPlanes = new Plane[6];
         readonly Vector4[] m_frustumPlanesOS = new Vector4[6];
 
+        // Camera pose used for the last frustum InitOrder. The visible set only changes
+        // when the camera moves, so — even when the sort runs every frame (SortMode.Always)
+        // — we rebuild it only past the same thresholds as sort refresh, not every frame.
+        // Seeded to infinity so the first frustum dispatch always runs.
+        Vector3 m_lastCullCamPos = new(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+        Vector3 m_lastCullCamRot;
+
         public GsplatRendererImpl(uint splatCount)
         {
             SplatCount = splatCount;
@@ -112,6 +119,8 @@ namespace Gsplat
                     SorterResource.Initialized = false;
                     m_prevCulled = false;
                 }
+                // Force a rebuild the next time frustum culling is (re-)enabled.
+                m_lastCullCamPos = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
                 m_cutoutsData = Array.Empty<GsplatCutout.ShaderData>();
                 m_remainingCount = GsplatResource.UploadedCount;
                 m_bounds = m_gsplatAsset.Bounds;
@@ -134,10 +143,14 @@ namespace Gsplat
                         cutoutsUnchanged = false;
             }
 
-            // With frustum culling the visible set depends on the camera, so never skip on
-            // unchanged cutouts — ComputeCutoutsRequired already gates this to camera-move /
-            // refresh-rate ticks (see RefreshOnCameraMove).
-            if (!frustum && cutoutsUnchanged && m_prevSplatCount == GsplatResource.UploadedCount)
+            // Skip the re-dispatch when nothing that affects the visible set changed:
+            // cutouts identical, splat count identical, and — for frustum culling — the
+            // camera has not moved past the refresh thresholds. This decouples the frustum
+            // rebuild from the per-frame sort cadence (SortMode.Always), so a static camera
+            // costs no InitOrder dispatch even while the sort keeps running every frame.
+            bool cameraStatic = frustum && !CameraMovedSinceLastCull(cullCamera);
+            if (cutoutsUnchanged && m_prevSplatCount == GsplatResource.UploadedCount
+                && (!frustum || cameraStatic))
                 return;
 
             m_prevSplatCount = GsplatResource.UploadedCount;
@@ -165,6 +178,21 @@ namespace Gsplat
             m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
             m_bounds = cutoutsUpdateBounds ? ExtractBounds() : m_gsplatAsset.Bounds;
             m_prevCulled = true;
+            if (frustum)
+            {
+                m_lastCullCamPos = cullCamera.transform.position;
+                m_lastCullCamRot = cullCamera.transform.eulerAngles;
+            }
+        }
+
+        // True if the cull camera moved/rotated past the (shared) refresh thresholds since
+        // the last frustum InitOrder. Matches RefreshOnCameraMove's naive euler comparison.
+        bool CameraMovedSinceLastCull(Camera cam)
+        {
+            var pos = cam.transform.position;
+            var rot = cam.transform.eulerAngles;
+            return (pos - m_lastCullCamPos).magnitude > GsplatSettings.Instance.CameraTranslationRefreshTreshold
+                || (rot - m_lastCullCamRot).magnitude > GsplatSettings.Instance.CameraRotationRefreshTreshold;
         }
 
         // Builds the 6 camera frustum planes in the asset's object space (inward normals,
