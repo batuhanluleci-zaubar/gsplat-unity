@@ -82,9 +82,15 @@ namespace Gsplat
                  "(green=fine .. red=coarse, gray=culled). Play mode only.")]
         public bool ChunkedDebugGizmos = false;
 
+        [Tooltip("Draw every chunk's AABB as a yellow wireframe cube in the Scene view. " +
+                 "Works in edit mode too (parses the chunk table directly).")]
+        public bool ChunkedShowChunkBounds = false;
+
         [SerializeField, HideInInspector] ComputeShader InitOrderChunkedShader;
         GsplatChunkTable m_chunkTableParsed;
         TextAsset m_chunkTableSource;
+        GsplatChunkTable m_gizmoTable;      // editor-side parse so chunk gizmos work without Play
+        TextAsset m_gizmoTableSource;
 
         // Editor-debug accessors (valid in Play mode when ChunkedLod is active).
         public GsplatChunkTable ChunkedTableRuntime => m_chunkTableParsed;
@@ -173,6 +179,28 @@ namespace Gsplat
                 Gizmos.matrix = transform.localToWorldMatrix;
                 Gizmos.color = Color.green;
                 Gizmos.DrawWireCube(Bounds.center, Bounds.size);
+            }
+
+            // All chunk AABBs as yellow wireframe cubes — works in edit mode (parses the
+            // chunk table directly, no Play needed).
+            if (ChunkedShowChunkBounds && ChunkTable != null)
+            {
+                if (m_gizmoTable == null || m_gizmoTableSource != ChunkTable)
+                {
+                    try { m_gizmoTable = GsplatChunkTable.Parse(ChunkTable.text); }
+                    catch { m_gizmoTable = null; }
+                    m_gizmoTableSource = ChunkTable;
+                }
+                if (m_gizmoTable != null)
+                {
+                    Gizmos.matrix = transform.localToWorldMatrix;
+                    Gizmos.color = Color.yellow;
+                    for (int c = 0; c < m_gizmoTable.ChunkCount; c++)
+                    {
+                        var a = m_gizmoTable.Chunks[c].Aabb;
+                        Gizmos.DrawWireCube(a.center, a.size);
+                    }
+                }
             }
 
             if (ChunkedDebugGizmos && ChunkedLod && Application.isPlaying)
