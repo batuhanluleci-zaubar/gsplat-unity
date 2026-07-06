@@ -67,9 +67,20 @@ namespace Gsplat
         [Min(0.01f)]
         public float ChunkedLodBaseDistance = 5f;
 
-        [Tooltip("Each successive LOD band is this many times farther (PlayCanvas default 3).")]
+        [Tooltip("Each successive LOD band is this many times farther (PlayCanvas default 3). " +
+                 "IGNORED when Chunked Lod Auto Range is on.")]
         [Min(1.01f)]
         public float ChunkedLodMultiplier = 3f;
+
+        [Tooltip("Auto-fit the LOD ladder to the scene: derive the multiplier so the coarsest " +
+                 "level lands at the scene diagonal, mapping ALL levels onto the actual view " +
+                 "distances as a near→far gradient. A fixed multiplier stretches the ladder past " +
+                 "a compact scene (only LOD0-2 reachable). On by default; overrides " +
+                 "Chunked Lod Multiplier. Live value shown in the debug panel.")]
+        public bool ChunkedLodAutoRange = true;
+
+        // Multiplier actually used last frame (auto-derived or manual) — for the debug panel.
+        [System.NonSerialized] public float m_lastEffectiveMultiplier = 3f;
 
         [Tooltip("Fixed global LOD level when distance LOD is off (0 = finest).")]
         [Min(0)]
@@ -329,16 +340,31 @@ namespace Gsplat
                         m_chunkTableParsed = GsplatChunkTable.Parse(ChunkTable.text);
                         m_chunkTableSource = ChunkTable;
                     }
+                    // Scene-adaptive LOD range: a fixed multiplier (e.g. 3) spreads the ladder far
+                    // beyond a compact scene so only LOD0-2 are ever reachable by distance. When
+                    // ChunkedLodAutoRange is on, derive the multiplier so LOD maxLod lands at the
+                    // scene's diagonal — the full ladder maps onto the actual view distances as a
+                    // smooth near→far gradient, for any scene size / LOD count. Overrides the
+                    // manual ChunkedLodMultiplier.
+                    float effMult = ChunkedLodMultiplier;
+                    if (ChunkedLodAutoRange && m_chunkTableParsed.MaxLod > 1)
+                    {
+                        float diag = m_chunkTableParsed.Bounds.size.magnitude;
+                        float b = Mathf.Max(0.01f, ChunkedLodBaseDistance);
+                        effMult = Mathf.Max(1.2f,
+                            Mathf.Pow(Mathf.Max(1.001f, diag / b), 1f / (m_chunkTableParsed.MaxLod - 1)));
+                    }
+                    m_lastEffectiveMultiplier = effMult;
                     if (PoolMode)
                         m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull,
+                            ChunkedLodBaseDistance, effMult, ChunkedCull,
                             ChunkedBudgetBalancer, FrustumCullMargin,
                             ChunkedLodHysteresis, ChunkedHysteresis);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin,
+                            ChunkedLodBaseDistance, effMult, ChunkedCull, FrustumCullMargin,
                             ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis);
                 }
                 else
