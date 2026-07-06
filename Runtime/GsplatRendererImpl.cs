@@ -397,11 +397,16 @@ namespace Gsplat
                     bool inside = minSlack >= 0f;
                     if (hysteresis)
                     {
-                        // ±hyst·wr deadband around the frustum boundary: a visible chunk stays
-                        // visible until clearly outside; a culled chunk re-enters only when
-                        // clearly inside — no pop-in/out flicker as the camera jitters at the edge.
+                        // Schmitt trigger on the frustum boundary: a visible chunk stays visible
+                        // until CLEARLY outside (exit at -hm), while a culled chunk re-enters at
+                        // the plain conservative threshold (0) — the thresholds differ by hm, so
+                        // edge jitter still can't flicker, but re-entry is NEVER stricter than
+                        // the plain test. (A +hm re-entry threshold locked chunks with content
+                        // still on screen in the culled state after they were culled once — the
+                        // "approach a chunk and it suddenly culls" bug.)
                         float hm = hyst * wr;
-                        inside = prev != 0xFFFFFFFFu ? minSlack >= -hm : minSlack >= hm;
+                        if (prev != 0xFFFFFFFFu) inside = minSlack >= -hm;
+                        // else: keep the plain-test result (re-enter as soon as truly visible)
                     }
                     m_selectedLevel[c] = inside ? (uint)use : 0xFFFFFFFFu;
                 }
