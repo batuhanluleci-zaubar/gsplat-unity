@@ -263,11 +263,17 @@ namespace Gsplat
         // InitOrderChunked over the combined buffer; reuses existing depth+sort+draw.
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
-            bool cull, float cullMargin)
+            bool cull, float cullMargin, int splatBudget)
         {
             EnsureChunkSetup(table);
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, cull, cullMargin);
+            // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
+            // LODs in a compact scene; the budget balancer is what forces the full ladder into
+            // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
+            // exactly like PlayCanvas's sqrt-distance bucket balancer. 0 = disabled (distance only).
+            m_lastBalancedTotal = (splatBudget > 0 && camera != null)
+                ? ApplyBudgetBalancer(table, splatBudget) : 0;
             m_selectedLevelBuffer.SetData(m_selectedLevel);
             bool doCull = cull && camera != null;
 

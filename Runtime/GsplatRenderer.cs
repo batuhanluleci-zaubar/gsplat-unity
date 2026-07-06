@@ -93,6 +93,15 @@ namespace Gsplat
                  "Streaming-pool only.")]
         public bool ChunkedBudgetBalancer = true;
 
+        [Tooltip("Combined-path drawn-splat budget (PlayCanvas splatBudget). The distance bands " +
+                 "alone only reach a few LODs in a compact scene; this degrades the farthest " +
+                 "chunks toward the coarsest LOD until the drawn total fits, so the FULL LOD " +
+                 "ladder is used and far regions coarsen aggressively (reach LOD max much closer). " +
+                 "0 = disabled (pure distance LOD). Ignored in streaming-pool mode " +
+                 "(ChunkedPoolBudget governs there).")]
+        [Min(0)]
+        public int ChunkedSplatBudget = 0;
+
         [Tooltip("Draw each chunk's AABB in the Scene view, colored by its selected LOD " +
                  "(green=fine .. red=coarse, gray=culled). Play mode only.")]
         public bool ChunkedDebugGizmos = false;
@@ -316,7 +325,8 @@ namespace Gsplat
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin);
+                            ChunkedLodBaseDistance, ChunkedLodMultiplier, ChunkedCull, FrustumCullMargin,
+                            ChunkedSplatBudget);
                 }
                 else
                 {
