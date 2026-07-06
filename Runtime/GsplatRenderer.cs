@@ -78,9 +78,17 @@ namespace Gsplat
         [Tooltip("Cull chunks whose bounding sphere is outside the cull camera frustum.")]
         public bool ChunkedCull = true;
 
+        [Tooltip("Draw each chunk's AABB in the Scene view, colored by its selected LOD " +
+                 "(green=fine .. red=coarse, gray=culled). Play mode only.")]
+        public bool ChunkedDebugGizmos = false;
+
         [SerializeField, HideInInspector] ComputeShader InitOrderChunkedShader;
         GsplatChunkTable m_chunkTableParsed;
         TextAsset m_chunkTableSource;
+
+        // Editor-debug accessors (valid in Play mode when ChunkedLod is active).
+        public GsplatChunkTable ChunkedTableRuntime => m_chunkTableParsed;
+        public uint[] ChunkedSelectedLevels => m_renderer?.SelectedLevels;
 
         GsplatAsset m_prevAsset;
         GsplatRendererImpl m_renderer;
@@ -150,6 +158,13 @@ namespace Gsplat
             m_renderer?.ForceRefresh();
         }
 
+        // Green (finest) -> red (coarsest) ramp for a LOD level, shared by gizmos + inspector.
+        public static Color LodColor(int level, int maxLod)
+        {
+            float t = maxLod <= 0 ? 0f : Mathf.Clamp01((float)level / maxLod);
+            return Color.Lerp(new Color(0.2f, 0.85f, 0.3f), new Color(0.9f, 0.25f, 0.2f), t);
+        }
+
 #if UNITY_EDITOR
         public void OnDrawGizmos()
         {
@@ -158,6 +173,25 @@ namespace Gsplat
                 Gizmos.matrix = transform.localToWorldMatrix;
                 Gizmos.color = Color.green;
                 Gizmos.DrawWireCube(Bounds.center, Bounds.size);
+            }
+
+            if (ChunkedDebugGizmos && ChunkedLod && Application.isPlaying)
+            {
+                var table = ChunkedTableRuntime;
+                var sel = ChunkedSelectedLevels;
+                if (table != null && sel != null)
+                {
+                    Gizmos.matrix = transform.localToWorldMatrix;
+                    for (int c = 0; c < table.ChunkCount && c < sel.Length; c++)
+                    {
+                        uint lvl = sel[c];
+                        Gizmos.color = lvl == 0xFFFFFFFFu
+                            ? new Color(0.4f, 0.4f, 0.4f, 0.4f)
+                            : LodColor((int)lvl, table.MaxLod);
+                        var a = table.Chunks[c].Aabb;
+                        Gizmos.DrawWireCube(a.center, a.size);
+                    }
+                }
             }
         }
 

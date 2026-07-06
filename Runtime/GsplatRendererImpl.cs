@@ -69,6 +69,9 @@ namespace Gsplat
         uint[] m_selectedLevel;
         readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
+        // Per-chunk LOD currently selected this frame (0xFFFFFFFF = culled), for editor debug.
+        public uint[] SelectedLevels => m_selectedLevel;
+
         public GsplatRendererImpl(uint splatCount)
         {
             SplatCount = splatCount;

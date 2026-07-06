@@ -9,6 +9,12 @@ namespace Gsplat.Editor
     [CustomEditor(typeof(GsplatRenderer))]
     public class GsplatRendererEditor : UnityEditor.Editor
     {
+        bool m_showPerChunk;
+
+        // Repaint every frame in Play so the live per-chunk LOD panel tracks the camera.
+        public override bool RequiresConstantRepaint() =>
+            Application.isPlaying && ((GsplatRenderer)target).ChunkedLod;
+
         public override void OnInspectorGUI()
         {
             serializedObject.Update();
@@ -101,6 +107,77 @@ namespace Gsplat.Editor
             }
 
             serializedObject.ApplyModifiedProperties();
+
+            DrawChunkedLodDebug((GsplatRenderer)target);
+        }
+
+        // Live per-chunk LOD panel: a fill-bar histogram of chunks-per-level + a per-chunk
+        // list, each bar colored green(fine)->red(coarse), gray=culled. Play mode only.
+        void DrawChunkedLodDebug(GsplatRenderer r)
+        {
+            if (!r.ChunkedLod) return;
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Chunked LOD — Live", EditorStyles.boldLabel);
+            if (!Application.isPlaying)
+            {
+                EditorGUILayout.HelpBox("Enter Play mode to see each chunk's selected LOD.", MessageType.Info);
+                return;
+            }
+            var table = r.ChunkedTableRuntime;
+            var sel = r.ChunkedSelectedLevels;
+            if (table == null || sel == null || table.ChunkCount == 0)
+            {
+                EditorGUILayout.HelpBox("No chunk table loaded yet (waiting for upload).", MessageType.None);
+                return;
+            }
+
+            int maxLod = table.MaxLod;
+            var perLevel = new int[maxLod + 1];
+            int culled = 0;
+            long drawn = 0, lod0Total = 0;
+            for (int c = 0; c < table.ChunkCount; c++)
+            {
+                lod0Total += table.Chunks[c].Lods[0].Count;
+                uint lvl = c < sel.Length ? sel[c] : 0xFFFFFFFFu;
+                if (lvl == 0xFFFFFFFFu) culled++;
+                else if (lvl <= (uint)maxLod) { perLevel[lvl]++; drawn += table.Chunks[c].Lods[lvl].Count; }
+            }
+
+            float pct = lod0Total > 0 ? 100f * drawn / lod0Total : 0f;
+            EditorGUILayout.LabelField($"{table.ChunkCount} chunks   drawn {drawn:N0} splats   ({pct:F1}% of full LOD0)");
+
+            for (int L = 0; L <= maxLod; L++)
+                DrawFill((float)perLevel[L] / table.ChunkCount,
+                    GsplatRenderer.LodColor(L, maxLod), $"LOD {L}   {perLevel[L]} chunks");
+            DrawFill((float)culled / table.ChunkCount, new Color(0.45f, 0.45f, 0.45f),
+                $"Culled   {culled} chunks");
+
+            m_showPerChunk = EditorGUILayout.Foldout(m_showPerChunk, "Per-chunk LOD");
+            if (m_showPerChunk)
+            {
+                int shown = Mathf.Min(table.ChunkCount, 256);
+                for (int c = 0; c < shown; c++)
+                {
+                    uint lvl = c < sel.Length ? sel[c] : 0xFFFFFFFFu;
+                    bool cull = lvl == 0xFFFFFFFFu;
+                    // Fill = detail: finest fills the bar, coarsest is nearly empty.
+                    float frac = cull ? 0f : 1f - (maxLod > 0 ? (float)lvl / maxLod : 0f);
+                    Color col = cull ? new Color(0.45f, 0.45f, 0.45f) : GsplatRenderer.LodColor((int)lvl, maxLod);
+                    DrawFill(frac, col, cull ? $"chunk {c}   CULL" : $"chunk {c}   LOD {lvl}");
+                }
+                if (table.ChunkCount > shown)
+                    EditorGUILayout.LabelField($"… +{table.ChunkCount - shown} more chunks");
+            }
+        }
+
+        static void DrawFill(float frac, Color col, string label)
+        {
+            Rect r = EditorGUILayout.GetControlRect(false, 15);
+            EditorGUI.DrawRect(r, new Color(0f, 0f, 0f, 0.15f));
+            var fill = new Rect(r.x, r.y, r.width * Mathf.Clamp01(frac), r.height);
+            EditorGUI.DrawRect(fill, col);
+            EditorGUI.LabelField(new Rect(r.x + 4, r.y, r.width - 4, r.height), label, EditorStyles.miniLabel);
         }
     }
 }
