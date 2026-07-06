@@ -36,6 +36,9 @@ namespace Gsplat
         static readonly int k_scaleFactor = Shader.PropertyToID("_ScaleFactor");
         static readonly int k_frustumPlanes = Shader.PropertyToID("_FrustumPlanes");
         static readonly int k_cullMargin = Shader.PropertyToID("_CullMargin");
+        static readonly int k_packedSplatsBuffer = Shader.PropertyToID("_PackedSplatsBuffer");
+        static readonly int k_splatChunkBuffer = Shader.PropertyToID("_SplatChunk");
+        static readonly int k_selectedLevelBuffer = Shader.PropertyToID("_SelectedLevel");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -58,6 +61,13 @@ namespace Gsplat
         // Seeded to infinity so the first frustum dispatch always runs.
         Vector3 m_lastCullCamPos = new(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
         Vector3 m_lastCullCamRot;
+
+        // Chunked-LOD runtime state (see docs/CHUNKED_LOD_DESIGN.md, GsplatChunkTable).
+        GsplatChunkTable m_chunkTable;
+        GraphicsBuffer m_splatChunkBuffer;      // per-splat (chunkId<<4)|level tags
+        GraphicsBuffer m_selectedLevelBuffer;   // per-chunk chosen level (updated each frame)
+        uint[] m_selectedLevel;
+        readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
         public GsplatRendererImpl(uint splatCount)
         {
@@ -213,6 +223,84 @@ namespace Gsplat
             }
         }
 
+        void EnsureChunkSetup(GsplatChunkTable table)
+        {
+            if (ReferenceEquals(m_chunkTable, table) && m_splatChunkBuffer != null)
+                return;
+            m_chunkTable = table;
+            m_splatChunkBuffer?.Dispose();
+            m_selectedLevelBuffer?.Dispose();
+            var tags = table.BuildSplatChunkTags();
+            m_splatChunkBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, tags.Length, sizeof(uint));
+            m_splatChunkBuffer.SetData(tags);
+            m_selectedLevel = new uint[table.ChunkCount];
+            m_selectedLevelBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
+                Mathf.Max(1, table.ChunkCount), sizeof(uint));
+        }
+
+        // Chunked-LOD visible-set build: choose one LOD level per chunk (R1: a fixed global
+        // level, optionally sphere-culled against the camera frustum), upload the per-chunk
+        // selection, then dispatch InitOrderChunked over the combined buffer. Reuses the
+        // existing depth+sort+draw on the resulting OrderBuffer/RemainingCount.
+        public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
+            int fixedLevel, bool cull, Camera cullCamera, float cullMargin)
+        {
+            EnsureChunkSetup(table);
+            int maxLod = table.MaxLod;
+            int req = Mathf.Clamp(fixedLevel, 0, maxLod);
+
+            bool doCull = cull && cullCamera != null;
+            if (doCull) GeometryUtility.CalculateFrustumPlanes(cullCamera, m_worldFrustumPlanes);
+            var ls = matrixWorld.lossyScale;
+            float scale = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
+
+            for (int c = 0; c < table.ChunkCount; c++)
+            {
+                // Requested level, falling back to the coarsest present level for this chunk.
+                int use = req;
+                while (use <= maxLod && table.Chunks[c].Lods[use].Count == 0) use++;
+                if (use > maxLod) { m_selectedLevel[c] = 0xFFFFFFFFu; continue; }
+
+                if (doCull)
+                {
+                    var sp = table.Chunks[c].Sphere;
+                    Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
+                    float wr = sp.w * scale;
+                    bool inside = true;
+                    for (int p = 0; p < 6; p++)
+                        if (m_worldFrustumPlanes[p].GetDistanceToPoint(wc) < -wr) { inside = false; break; }
+                    m_selectedLevel[c] = inside ? (uint)use : 0xFFFFFFFFu;
+                }
+                else m_selectedLevel[c] = (uint)use;
+            }
+            m_selectedLevelBuffer.SetData(m_selectedLevel);
+
+            SorterResource.Initialized = true;
+            m_prevCulled = true;
+
+            var res = (GsplatResourceSpark)GsplatResource;
+            int kernel = cs.FindKernel("InitOrderChunked");
+            SorterResource.OrderBuffer.SetCounterValue(0);
+            cs.SetInt(k_splatCount, (int)res.UploadedCount);
+            cs.SetBuffer(kernel, k_orderBuffer, SorterResource.OrderBuffer);
+            cs.SetBuffer(kernel, k_packedSplatsBuffer, res.PackedSplatsBuffer);
+            cs.SetBuffer(kernel, k_splatChunkBuffer, m_splatChunkBuffer);
+            cs.SetBuffer(kernel, k_selectedLevelBuffer, m_selectedLevelBuffer);
+
+            if (cullCamera != null)
+            {
+                BuildObjectSpaceFrustumPlanes(cullCamera, matrixWorld);
+                cs.EnableKeyword("FRUSTUM_CULL");
+                cs.SetVectorArray(k_frustumPlanes, m_frustumPlanesOS);
+                cs.SetFloat(k_cullMargin, cullMargin);
+            }
+            else cs.DisableKeyword("FRUSTUM_CULL");
+
+            cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
+            m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
+            m_bounds = m_gsplatAsset.Bounds;
+        }
+
         public void BindGsplatAsset(GsplatAsset gsplatAsset, bool asyncUpload = false)
         {
             Debug.Assert(m_gsplatAssetID == 0);
@@ -263,6 +351,11 @@ namespace Gsplat
             OrderSizeBuffer = null;
             BoundsBuffer?.Dispose();
             BoundsBuffer = null;
+            m_splatChunkBuffer?.Dispose();
+            m_splatChunkBuffer = null;
+            m_selectedLevelBuffer?.Dispose();
+            m_selectedLevelBuffer = null;
+            m_chunkTable = null;
         }
 
         public void ForceRefresh()

@@ -50,6 +50,26 @@ namespace Gsplat
         [Min(0f)]
         public float FrustumCullMargin = 0.5f;
 
+        [Header("Chunked LOD (experimental)")]
+        [Tooltip("Draw a per-chunk selected LOD from a combined chunked asset (baked by " +
+                 "tools/bake_chunks.py). Requires the combined .spz as GsplatAsset and its " +
+                 ".chunks.json sidecar below. Overrides the plain frustum path.")]
+        public bool ChunkedLod = false;
+
+        [Tooltip("The .chunks.json sidecar (TextAsset) matching the combined GsplatAsset.")]
+        public TextAsset ChunkTable;
+
+        [Tooltip("R1: fixed global LOD level drawn for every visible chunk (0 = finest).")]
+        [Min(0)]
+        public int ChunkedFixedLevel = 0;
+
+        [Tooltip("Cull chunks whose bounding sphere is outside the cull camera frustum.")]
+        public bool ChunkedCull = true;
+
+        [SerializeField, HideInInspector] ComputeShader InitOrderChunkedShader;
+        GsplatChunkTable m_chunkTableParsed;
+        TextAsset m_chunkTableSource;
+
         GsplatAsset m_prevAsset;
         GsplatRendererImpl m_renderer;
 
@@ -140,6 +160,9 @@ namespace Gsplat
             if (GsplatAsset &&
                 AssetDatabase.TryGetGUIDAndLocalFileIdentifier(GsplatAsset, out var guid, out long localId))
                 m_assetGuid = guid;
+            if (InitOrderChunkedShader == null)
+                InitOrderChunkedShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                    "Packages/wu.yize.gsplat/Runtime/Shaders/InitOrderChunked.compute");
 #endif // #if UNITY_EDITOR
         }
 
@@ -177,11 +200,25 @@ namespace Gsplat
                 m_renderer.EvaluateRefreshRequired(SortMode, SortRefreshRate - 1, CutoutsRefreshRate - 1);
                 // Only cull at runtime: in edit mode Camera.main would cull the Scene view too,
                 // making splats vanish while you look through it.
-                var cullCamera = (FrustumCulling && Application.isPlaying)
-                    ? (CullCamera != null ? CullCamera : Camera.main)
-                    : null;
-                m_renderer.DispatchInitOrder(Cutouts, transform.localToWorldMatrix, CutoutsUpdateBounds,
-                    cullCamera, FrustumCullMargin);
+                var runtimeCam = Application.isPlaying ? (CullCamera != null ? CullCamera : Camera.main) : null;
+
+                if (ChunkedLod && ChunkTable != null && InitOrderChunkedShader != null && Application.isPlaying)
+                {
+                    if (m_chunkTableParsed == null || m_chunkTableSource != ChunkTable)
+                    {
+                        m_chunkTableParsed = GsplatChunkTable.Parse(ChunkTable.text);
+                        m_chunkTableSource = ChunkTable;
+                    }
+                    m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
+                        transform.localToWorldMatrix, ChunkedFixedLevel, ChunkedCull,
+                        ChunkedCull ? runtimeCam : null, FrustumCullMargin);
+                }
+                else
+                {
+                    var cullCamera = FrustumCulling ? runtimeCam : null;
+                    m_renderer.DispatchInitOrder(Cutouts, transform.localToWorldMatrix, CutoutsUpdateBounds,
+                        cullCamera, FrustumCullMargin);
+                }
                 // When the global sorter has merged all renderers into a single draw call,
                 // skip the per-renderer draw — GsplatSorter.DrawAll handles rendering.
                 if (!GsplatSorter.Instance.GlobalRenderEnabled)
