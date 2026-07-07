@@ -93,6 +93,12 @@ namespace Gsplat
         [Tooltip("Cull chunks whose bounding sphere is outside the cull camera frustum.")]
         public bool ChunkedCull = true;
 
+        [Tooltip("Also cull individual off-screen splats of partly-visible (straddling) chunks, " +
+                 "not just whole chunks — draws exactly what the camera sees, trimming the tris of " +
+                 "chunks that are half in view. Keeps every splat whose footprint touches the " +
+                 "frustum (no holes). Costs one per-splat frustum test in the InitOrder pass.")]
+        public bool ChunkedPerSplatCull = true;
+
         [Tooltip("Scales the per-chunk cull radius (the baked exact per-level footprint). " +
                  "1 = exact visible 2σ core (tight, culls off-screen background to save tris). " +
                  "Lower (0.7–0.9) = tighter/fewer drawn if you can accept faint edge clipping; " +
@@ -386,7 +392,8 @@ namespace Gsplat
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             effBase, effMult, ChunkedCull, FrustumCullMargin,
-                            ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale);
+                            ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
+                            ChunkedPerSplatCull);
                 }
                 else
                 {

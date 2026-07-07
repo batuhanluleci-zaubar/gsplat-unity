@@ -273,7 +273,8 @@ namespace Gsplat
         // InitOrderChunked over the combined buffer; reuses existing depth+sort+draw.
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
-            bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst, float cullFootprintScale)
+            bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst, float cullFootprintScale,
+            bool perSplatCull)
         {
             EnsureChunkSetup(table);
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
@@ -298,15 +299,23 @@ namespace Gsplat
             cs.SetBuffer(kernel, k_splatChunkBuffer, m_splatChunkBuffer);
             cs.SetBuffer(kernel, k_selectedLevelBuffer, m_selectedLevelBuffer);
 
-            // Frustum culling is PER-CHUNK ONLY (footprint-sphere test in ComputeSelectedLevels,
-            // PlayCanvas per-node parity). The per-SPLAT footprint test was REMOVED: at a portrait
-            // view it stripped ~56% of the selected splats — including on-screen vault/window
-            // content — because a kept edge chunk's splats near the frustum boundary were rejected
-            // even though the chunk (and much of its content) is visible. A whole-chunk cull that
-            // keeps every chunk with any visible content, plus drawing all its splats, matches
-            // PlayCanvas and the requirement "don't cull what's in view". cullMargin now only
-            // widens the per-chunk sphere test.
-            cs.DisableKeyword("FRUSTUM_CULL");
+            // Two-tier frustum cull for the user's exact spec — "cull everything the camera
+            // can't see, cull nothing it can see." Tier 1 (per-CHUNK, ComputeSelectedLevels)
+            // drops whole off-screen chunks cheaply. Tier 2 (per-SPLAT, here) trims the
+            // OFF-SCREEN splats of the STRADDLING chunks that tier 1 keeps — a chunk half in
+            // view no longer draws its off-screen half (the tris waste the user reported),
+            // while every splat whose 3σ footprint touches the frustum is kept (no holes).
+            // Each splat survives unless its OWN footprint is fully outside, so partly-visible
+            // chunks keep exactly their visible splats. Now that the per-chunk radius is the
+            // exact baked footprint (footR), tier 2 removes genuinely off-screen splats only.
+            if (perSplatCull && cull && camera != null)
+            {
+                BuildObjectSpaceFrustumPlanes(camera, matrixWorld);
+                cs.EnableKeyword("FRUSTUM_CULL");
+                cs.SetVectorArray(k_frustumPlanes, m_frustumPlanesOS);
+                cs.SetFloat(k_cullMargin, cullMargin);
+            }
+            else cs.DisableKeyword("FRUSTUM_CULL");
 
             cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
             m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
