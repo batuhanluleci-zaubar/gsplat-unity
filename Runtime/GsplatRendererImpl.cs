@@ -44,6 +44,8 @@ namespace Gsplat
         static readonly int k_minPixelSize = Shader.PropertyToID("_GsplatMinPixelSize");
         static readonly int k_minContribution = Shader.PropertyToID("_GsplatMinContribution");
         static readonly int k_alphaClip = Shader.PropertyToID("_GsplatAlphaClip");
+        static readonly int k_foveationStrength = Shader.PropertyToID("_GsplatFoveationStrength");
+        static readonly int k_foveationCenter = Shader.PropertyToID("_GsplatFoveationCenter");
         static readonly int k_poolLiveMask = Shader.PropertyToID("_PoolLiveMask");
 
         uint m_framesBeforeRecomputeSort = 0;
@@ -949,6 +951,8 @@ namespace Gsplat
             Shader.SetGlobalFloat(k_minPixelSize, GsplatSettings.Instance.MinPixelSize);
             Shader.SetGlobalFloat(k_minContribution, GsplatSettings.Instance.MinContribution);
             Shader.SetGlobalFloat(k_alphaClip, GsplatSettings.Instance.AlphaClipForward);
+            Shader.SetGlobalFloat(k_foveationStrength, GsplatSettings.Instance.FoveationStrength);
+            Shader.SetGlobalFloat(k_foveationCenter, GsplatSettings.Instance.FoveationCenter);
 
             uint order = Math.Clamp(renderOrder, 0, GsplatSettings.Instance.MaxRenderOrder - 1);
             var rp = new RenderParams(m_gsplatAsset.Materials[order])

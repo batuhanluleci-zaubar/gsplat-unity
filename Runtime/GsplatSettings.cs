@@ -113,6 +113,19 @@ namespace Gsplat
         [Range(0f, 0.25f)]
         public float AlphaClipForward = 1f / 255f;
 
+        [Tooltip("Foveated contribution cull (PlayCanvas foveation, P2.7): adds up to this much to " +
+                 "MinContribution toward the screen EDGE, so peripheral low-contribution splats are " +
+                 "dropped while the center (fovea) is untouched — a cheap XR fill-rate lever. 0 = off " +
+                 "(exact no-op). Try 2-5 on XR; validate on device (per-eye NDC, only the far " +
+                 "periphery is affected). Composes with fixed-foveated rendering.")]
+        [Range(0f, 10f)]
+        public float FoveationStrength = 0f;
+
+        [Tooltip("Fovea radius in NDC (distance from screen center, 0..~1.4) where foveation starts " +
+                 "ramping in. 0.3 = inner ~30% untouched. Only used when FoveationStrength > 0.")]
+        [Range(0f, 1f)]
+        public float FoveationCenter = 0.3f;
+
         public GsplatMaterial[] Materials;
         public Mesh Mesh { get; private set; }
 
@@ -167,6 +180,8 @@ namespace Gsplat
             MinPixelSize = 2f;
             MinContribution = 3f;
             AlphaClipForward = 1f / 255f;
+            FoveationStrength = 0f;
+            FoveationCenter = 0.3f;
 
             m_prevComputeShader = null;
             m_prevSplatInstanceSize = 0;

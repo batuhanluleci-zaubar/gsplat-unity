@@ -47,6 +47,8 @@ float _GsplatMinPixelSize;     // discard splats whose projected diameter is bel
 float _GsplatMinContribution;  // discard splats with opacity * 2pi * sqrt(det(cov2D)) below this
 float _GsplatAlphaClip;        // per-fragment alpha cutoff + quad-shrink threshold (default 1/255;
                                // raise toward 1/16 for XR fill-rate). 0 falls back to 1/255.
+float _GsplatFoveationStrength;  // P2.7: extra minContribution added toward screen edge (0 = off)
+float _GsplatFoveationCenter;    // fovea radius in NDC where foveation starts ramping (~0.3)
 
 bool InitCenter(float4x4 modelView, float3 modelCenter, out SplatCenter center)
 {
@@ -151,9 +153,21 @@ bool InitCorner(SplatSource source, SplatCovariance covariance, SplatCenter cent
     // gate removes them. det uses the UNCLAMPED smaller eigenvalue (PC parity: their compute
     // path gates on the raw dilated determinant and drops det<=0 outright); lambda2's 0.1
     // clamp below only protects the quad-axis math.
+    //
+    // Foveation (PC parity, P2.7): raise the contribution threshold toward the screen EDGE so
+    // peripheral low-contribution splats are dropped while the fovea is untouched — a cheap XR
+    // fill-rate lever (one smoothstep). effMin = minContribution + strength*smoothstep(center,1,|ndc|).
+    // _GsplatFoveationStrength default 0 = exact no-op. Per-eye NDC; only the far periphery
+    // (|ndc|>center~0.3) is affected, where inter-eye disparity is small.
     float det2d = lambda1 * (mid - radius);
-    if (_GsplatMinContribution > 0.0 &&
-        (det2d <= 0.0 || alpha * 6.2831853 * sqrt(max(det2d, 0.0)) < _GsplatMinContribution))
+    float effMinContribution = _GsplatMinContribution;
+    if (_GsplatFoveationStrength > 0.0)
+    {
+        float2 ndc = center.proj.xy / max(abs(center.proj.w), 1e-6);
+        effMinContribution += _GsplatFoveationStrength * smoothstep(_GsplatFoveationCenter, 1.0, length(ndc));
+    }
+    if (effMinContribution > 0.0 &&
+        (det2d <= 0.0 || alpha * 6.2831853 * sqrt(max(det2d, 0.0)) < effMinContribution))
     {
         return false;
     }

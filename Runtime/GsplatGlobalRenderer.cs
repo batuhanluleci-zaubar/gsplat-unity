@@ -97,6 +97,8 @@ namespace Gsplat
         static readonly int k_minPixelSizeGlobal = Shader.PropertyToID("_GsplatMinPixelSize");
         static readonly int k_minContributionGlobal = Shader.PropertyToID("_GsplatMinContribution");
         static readonly int k_alphaClipGlobal = Shader.PropertyToID("_GsplatAlphaClip");
+        static readonly int k_foveationStrengthGlobal = Shader.PropertyToID("_GsplatFoveationStrength");
+        static readonly int k_foveationCenterGlobal = Shader.PropertyToID("_GsplatFoveationCenter");
         static readonly int k_srcUint2 = Shader.PropertyToID("_SrcUint2");
         static readonly int k_dstUint2 = Shader.PropertyToID("_DstUint2");
         static readonly int k_srcElementCount = Shader.PropertyToID("_SrcElementCount");
@@ -489,6 +491,8 @@ namespace Gsplat
             Shader.SetGlobalFloat(k_minPixelSizeGlobal, GsplatSettings.Instance.MinPixelSize);
             Shader.SetGlobalFloat(k_minContributionGlobal, GsplatSettings.Instance.MinContribution);
             Shader.SetGlobalFloat(k_alphaClipGlobal, GsplatSettings.Instance.AlphaClipForward);
+            Shader.SetGlobalFloat(k_foveationStrengthGlobal, GsplatSettings.Instance.FoveationStrength);
+            Shader.SetGlobalFloat(k_foveationCenterGlobal, GsplatSettings.Instance.FoveationCenter);
 
             if (m_globalSHBands >= 1)
                 m_globalPropertyBlock.SetBuffer(k_globalSH1Buffer, m_globalSH1Buffer);
