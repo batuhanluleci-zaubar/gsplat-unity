@@ -83,6 +83,9 @@ namespace Gsplat
         GsplatChunkPool.Layout m_poolLayout;
         GsplatChunkTable m_poolTable;           // table the layout was built against
         GraphicsBuffer m_poolLiveMaskBuffer;
+        // Disk-streaming pool (S4): async blob loader + count of selected chunk-levels still loading.
+        GsplatStreamingLoader m_streamLoader;
+        public int m_streamPending;
         readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
         // R3 budget-balancer scratch (see ApplyBudgetBalancer). Per-chunk camera distance +
@@ -754,6 +757,81 @@ namespace Gsplat
             }
         }
 
+        // R4 DISK-streaming pool: like DispatchChunkedPool's incremental path, but the selected
+        // chunk-levels are NOT in a full-asset CPU array — they stream from per-(chunk,level) .spz
+        // blobs on disk (async load + worker decode, GsplatStreamingLoader) into pool slots
+        // (FillStreaming). Bounds BOTH VRAM (budget-sized pool) AND CPU RAM (only in-flight blobs
+        // + the budget live in memory; the metadata-only GsplatAssetStreaming holds no splats).
+        // Runs FillStreaming every refresh while loads are pending so streamed blocks appear
+        // without a camera move; skips only when settled AND the camera is still.
+        public void DispatchStreamingPool(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
+            Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
+            float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
+            float hyst, float cullFootprintScale, byte shBands)
+        {
+            if (cs == null) return;
+            m_streamLoader ??= new GsplatStreamingLoader(2);
+            m_poolLayout ??= new GsplatChunkPool.Layout();
+            if (!ReferenceEquals(m_poolTable, table))
+            {
+                m_poolLayout.Reset(0);
+                m_streamLoader.Clear();
+                m_poolTable = table;
+            }
+
+            bool cameraMoved = camera == null || m_remainingCount == 0 || CameraMovedSinceLastCull(camera);
+            // Settled (no in-flight loads) + still + already built → nothing changed, skip.
+            if (!cameraMoved && m_streamLoader.PendingCount == 0 && m_remainingCount > 0)
+                return;
+
+            if (cameraMoved)
+            {
+                ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
+                    baseDistance, multiplier, behindPenalty, cull, cullMargin, budgetBalance, hysteresis, hyst,
+                    cullFootprintScale, false, 0f);
+                m_lastBalancedTotal = (budgetBalance && camera != null)
+                    ? ApplyBudgetBalancer(table, (int)SplatCount) : 0;
+                if (camera != null)
+                {
+                    m_lastCullCamPos = camera.transform.position;
+                    m_lastCullCamRot = camera.transform.eulerAngles;
+                }
+            }
+
+            // Drain completed loads into slots + request loads for selected-not-resident chunks.
+            uint visible = GsplatChunkPool.FillStreaming((GsplatResourceSpark)GsplatResource, table,
+                m_selectedLevel, m_poolLayout, m_streamLoader, shBands, out m_poolOverflow, out m_streamPending);
+
+            // Rebuild the appended visible order from the liveness mask (holes = not-yet-loaded /
+            // freed slots are skipped). Same InitOrderPool path as the incremental RAM pool.
+            var mask = m_poolLayout.LiveMask;
+            if (m_poolLiveMaskBuffer == null || m_poolLiveMaskBuffer.count != mask.Length)
+            {
+                m_poolLiveMaskBuffer?.Dispose();
+                m_poolLiveMaskBuffer = mask.Length > 0
+                    ? new GraphicsBuffer(GraphicsBuffer.Target.Structured, mask.Length, sizeof(uint))
+                    : null;
+                m_poolLayout.MaskDirty = mask.Length > 0;
+            }
+            if (m_poolLayout.MaskDirty && m_poolLiveMaskBuffer != null)
+            {
+                m_poolLiveMaskBuffer.SetData(mask);
+                m_poolLayout.MaskDirty = false;
+            }
+            SorterResource.OrderBuffer.SetCounterValue(0);
+            if (m_poolLayout.UsedEnd > 0 && m_poolLiveMaskBuffer != null)
+            {
+                int kernel = cs.FindKernel("InitOrderPool");
+                cs.SetInt(k_splatCount, m_poolLayout.UsedEnd);
+                cs.SetBuffer(kernel, k_orderBuffer, SorterResource.OrderBuffer);
+                cs.SetBuffer(kernel, k_poolLiveMask, m_poolLiveMaskBuffer);
+                cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp((uint)m_poolLayout.UsedEnd, 1024), 1, 1);
+            }
+            m_remainingCount = visible;
+            SorterResource.Initialized = true;
+            m_bounds = m_gsplatAsset.Bounds;
+        }
+
         public void BindGsplatAsset(GsplatAsset gsplatAsset, bool asyncUpload = false, bool poolMode = false)
         {
             Debug.Assert(m_gsplatAssetID == 0);
@@ -853,6 +931,8 @@ namespace Gsplat
             m_poolLiveMaskBuffer = null;
             m_poolLayout = null;
             m_poolTable = null;
+            m_streamLoader?.Clear();
+            m_streamLoader = null;
         }
 
         public void ForceRefresh()

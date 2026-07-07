@@ -129,6 +129,14 @@ namespace Gsplat
         [Min(1000)]
         public int ChunkedPoolBudget = 2_000_000;
 
+        [Tooltip("DISK streaming: path to a .gsstream directory (baker --streaming output) holding " +
+                 "per-(chunk,level) .spz blobs + a *.chunks.json manifest. When set (and ChunkedLod " +
+                 "on, in Play), the renderer streams chunk-levels from DISK into the budget-sized pool " +
+                 "on demand — bounding BOTH VRAM (budget) AND CPU RAM (only in-flight blobs + the " +
+                 "budget live in memory; GsplatAsset is ignored). This is the 10-15M path. Absolute, " +
+                 "or relative to the project (…/Assets/…). Empty = use GsplatAsset (combined/RAM pool).")]
+        public string ChunkedStreamDir = "";
+
         [Tooltip("Incremental pool refill (PlayCanvas BlockAllocator analogue): each refresh " +
                  "uploads ONLY chunks whose selected LOD changed instead of re-uploading the " +
                  "entire pool (tens of MB of SetData every time the camera crosses the " +
@@ -204,13 +212,52 @@ namespace Gsplat
         bool m_wasPoolMode;
         GsplatRendererImpl m_renderer;
 
-        // Streaming pool mode: budget-resident, populated per frame — only in Play with a
-        // chunk table (needs the asset's CPU arrays; the pool has nothing until the first Fill).
-        bool PoolMode => ChunkedLod && ChunkedStreaming && ChunkTable != null && Application.isPlaying;
+        // DISK-streaming mode: chunk-levels stream from .gsstream blobs on disk (RAM-bounded); the
+        // serialized GsplatAsset is ignored in favor of a metadata-only runtime asset.
+        bool StreamingMode => ChunkedLod && !string.IsNullOrEmpty(ChunkedStreamDir) && Application.isPlaying;
 
-        public bool Valid => GsplatAsset &&
-                             (PoolMode ? m_renderer?.GsplatResource != null
-                                 : (RenderBeforeUploadComplete ? SplatCount > 0 : SplatCount == GsplatAsset.SplatCount));
+        // Streaming pool mode: budget-resident, populated per frame. RAM pool (ChunkedStreaming +
+        // ChunkTable) copies from the asset's CPU arrays; DISK streaming (StreamingMode) loads blobs.
+        bool PoolMode => StreamingMode ||
+                         (ChunkedLod && ChunkedStreaming && ChunkTable != null && Application.isPlaying);
+
+        // The asset actually bound: a metadata-only streaming asset in disk-streaming mode, else the
+        // serialized GsplatAsset. Built lazily from the .gsstream manifest.
+        GsplatChunkTable m_streamTable;
+        GsplatAssetStreaming m_streamAsset;
+        string m_streamDirLoaded;
+
+        GsplatAsset EffectiveAsset => StreamingMode ? EnsureStreamAsset() : GsplatAsset;
+
+        GsplatAsset EnsureStreamAsset()
+        {
+            if (m_streamAsset != null && m_streamDirLoaded == ChunkedStreamDir) return m_streamAsset;
+            try
+            {
+                string dir = System.IO.Path.IsPathRooted(ChunkedStreamDir)
+                    ? ChunkedStreamDir
+                    : System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), ChunkedStreamDir);
+                var manifests = System.IO.Directory.GetFiles(dir, "*.chunks.json");
+                if (manifests.Length == 0)
+                    throw new System.IO.FileNotFoundException($"No *.chunks.json in stream dir '{dir}'");
+                m_streamTable = GsplatChunkTable.ParseStreaming(System.IO.File.ReadAllText(manifests[0]), dir);
+                m_streamAsset = GsplatAssetStreaming.FromStreamingTable(m_streamTable,
+                    System.IO.Path.GetFileNameWithoutExtension(manifests[0]));
+                m_streamDirLoaded = ChunkedStreamDir;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[Gsplat] streaming manifest load failed for '{ChunkedStreamDir}': {e.Message}");
+                m_streamAsset = null; m_streamTable = null;
+            }
+            return m_streamAsset;
+        }
+
+        public bool Valid => StreamingMode
+            ? m_renderer?.GsplatResource != null
+            : GsplatAsset &&
+              (PoolMode ? m_renderer?.GsplatResource != null
+                  : (RenderBeforeUploadComplete ? SplatCount > 0 : SplatCount == GsplatAsset.SplatCount));
 
         public uint SplatCount => m_renderer != null ? m_renderer.GsplatResource?.UploadedCount ?? 0 : 0;
 
@@ -369,7 +416,10 @@ namespace Gsplat
 
         public void Update()
         {
-            if (!GsplatAsset)
+            // In disk-streaming mode the bound asset is a metadata-only runtime asset, not the
+            // serialized GsplatAsset. EffectiveAsset resolves it (and lazily loads the manifest).
+            var boundAsset = EffectiveAsset;
+            if (!boundAsset)
                 m_prevAsset = null;
             // Flipping pool mode at runtime (ChunkedLod/ChunkedStreaming toggled, ChunkTable
             // set/nulled) must force a full rebind: the pool resource holds only the resident
@@ -381,15 +431,15 @@ namespace Gsplat
                 m_prevAsset = null;
                 m_wasPoolMode = poolModeNow;
             }
-            if (m_prevAsset != GsplatAsset)
+            if (m_prevAsset != boundAsset)
             {
                 m_renderer?.ReleaseGsplatAsset();
-                m_prevAsset = GsplatAsset;
-                if (GsplatAsset)
+                m_prevAsset = boundAsset;
+                if (boundAsset)
                 {
                     // In streaming pool mode the GPU buffers are sized to the budget, not the
                     // full (2x-LOD) combined asset.
-                    uint cap = PoolMode ? (uint)ChunkedPoolBudget : GsplatAsset.SplatCount;
+                    uint cap = PoolMode ? (uint)ChunkedPoolBudget : boundAsset.SplatCount;
                     if (m_renderer == null)
                         m_renderer = new GsplatRendererImpl(cap);
                     else
@@ -399,7 +449,7 @@ namespace Gsplat
 #else
                     var asyncUpload = AsyncUpload;
 #endif
-                    m_renderer.BindGsplatAsset(GsplatAsset, asyncUpload, PoolMode);
+                    m_renderer.BindGsplatAsset(boundAsset, asyncUpload, PoolMode);
                     GsplatSorter.Instance.MarkGlobalBuffersDirty();
                 }
             }
@@ -411,7 +461,21 @@ namespace Gsplat
                 // making splats vanish while you look through it.
                 var runtimeCam = Application.isPlaying ? (CullCamera != null ? CullCamera : Camera.main) : null;
 
-                if (ChunkedLod && ChunkTable != null && Application.isPlaying)
+                // DISK-streaming branch: chunk-levels stream from .gsstream blobs into the pool.
+                if (StreamingMode && m_streamTable != null)
+                {
+                    float sBase = ChunkedLodBaseDistance, sMult = Mathf.Max(1.05f, ChunkedLodMultiplier);
+                    if (ChunkedLodAutoRange && m_streamTable.MaxLod > 1)
+                        sBase = Mathf.Min(ChunkedLodBaseDistance, m_streamTable.Bounds.size.magnitude / 4f);
+                    m_lastEffectiveBase = sBase;
+                    m_lastEffectiveMultiplier = sMult;
+                    m_renderer.DispatchStreamingPool(m_streamTable, InitOrderChunkedShader,
+                        transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
+                        sBase, sMult, ChunkedBehindPenalty, ChunkedCull, ChunkedBudgetBalancer,
+                        FrustumCullMargin, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
+                        m_streamTable.SHBands);
+                }
+                else if (ChunkedLod && ChunkTable != null && Application.isPlaying)
                 {
                     if (m_chunkTableParsed == null || m_chunkTableSource != ChunkTable)
                     {
