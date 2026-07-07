@@ -404,7 +404,18 @@ namespace Gsplat
                 {
                     var sp = table.Chunks[c].Sphere;
                     Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
-                    float wr = sp.w * scale + cullMargin;   // keep edge chunks (see method note)
+                    // LOD-aware footprint pad. The baked sphere covers only LOD0 (fine) splat
+                    // footprints, but this chunk is DRAWN at level `use`, whose merged splats have
+                    // far larger 3sigma footprints (a coarse splat is ~a cell wide). A chunk just
+                    // outside the frustum whose COARSE splats still reach on-screen must be kept,
+                    // else the wall/vault it covers shows holes (skybox through the gaps) — the bug
+                    // that a big uniform cullMargin was masking at the cost of drawing far
+                    // off-screen chunks too. Pad the cull radius by the chunk's own extent, scaled
+                    // by how coarse the selected level is (fine levels overhang little, the coarsest
+                    // ~a full cell). LOD-aware => keeps only the genuinely-visible edge band.
+                    float lodFrac = maxLod > 0 ? (float)use / maxLod : 0f;
+                    float footPad = table.Chunks[c].MaxExtent * scale * (0.25f + 1.25f * lodFrac);
+                    float wr = sp.w * scale + cullMargin + footPad;
                     float minSlack = float.MaxValue;        // >=0 => sphere intersects the frustum
                     for (int p = 0; p < 6; p++)
                         minSlack = Mathf.Min(minSlack, m_worldFrustumPlanes[p].GetDistanceToPoint(wc) + wr);
