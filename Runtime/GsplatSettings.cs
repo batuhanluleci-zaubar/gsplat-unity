@@ -90,6 +90,21 @@ namespace Gsplat
         public float CameraRotationRefreshTreshold;
 
         public bool ShowImportErrors;
+
+        [Tooltip("Discard splats whose projected diameter is below this many pixels (PlayCanvas " +
+                 "minPixelSize). 2 = PlayCanvas default and this package's previous hardcoded " +
+                 "behavior; 0 disables the gate. Applied in every splat vertex path (per-renderer " +
+                 "and merged/global draws) via a global shader float.")]
+        [Range(0f, 5f)]
+        public float MinPixelSize = 2f;
+
+        [Tooltip("Discard splats whose screen contribution (opacity x 2pi x sqrt|cov2D|) is below " +
+                 "this (PlayCanvas minContribution). Kills large-but-faint splats that the pixel-" +
+                 "size gate keeps. 3 = PlayCanvas default; their VR example ships 5 for fill-rate; " +
+                 "0 disables.")]
+        [Range(0f, 10f)]
+        public float MinContribution = 3f;
+
         public GsplatMaterial[] Materials;
         public Mesh Mesh { get; private set; }
 
@@ -141,6 +156,8 @@ namespace Gsplat
             CameraTranslationRefreshTreshold = 0.2f;
             CameraRotationRefreshTreshold = 10;
             ShowImportErrors = true;
+            MinPixelSize = 2f;
+            MinContribution = 3f;
 
             m_prevComputeShader = null;
             m_prevSplatInstanceSize = 0;

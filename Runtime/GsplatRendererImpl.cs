@@ -41,6 +41,8 @@ namespace Gsplat
         static readonly int k_selectedLevelBuffer = Shader.PropertyToID("_SelectedLevel");
         static readonly int k_fadeWeightBuffer = Shader.PropertyToID("_FadeWeight");
         static readonly int k_lodFadeEnabled = Shader.PropertyToID("_LodFadeEnabled");
+        static readonly int k_minPixelSize = Shader.PropertyToID("_GsplatMinPixelSize");
+        static readonly int k_minContribution = Shader.PropertyToID("_GsplatMinContribution");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -281,8 +283,8 @@ namespace Gsplat
         // InitOrderChunked over the combined buffer; reuses existing depth+sort+draw.
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
-            bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst, float cullFootprintScale,
-            bool perSplatCull, bool fade, float fadeWidth)
+            float behindPenalty, bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst,
+            float cullFootprintScale, bool perSplatCull, bool fade, float fadeWidth)
         {
             EnsureChunkSetup(table);
             // The draw shader now reads the per-chunk tag + selected level + fade weight to modulate
@@ -296,8 +298,8 @@ namespace Gsplat
                 m_propertyBlock.SetFloat(k_lodFadeEnabled, fade ? 1f : 0f);
             }
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, splatBudget > 0, hysteresis, hyst, cullFootprintScale,
-                fade, fadeWidth);
+                baseDistance, multiplier, behindPenalty, cull, cullMargin, splatBudget > 0, hysteresis, hyst,
+                cullFootprintScale, fade, fadeWidth);
             // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
             // LODs in a compact scene; the budget balancer is what forces the full ladder into
             // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
@@ -351,9 +353,9 @@ namespace Gsplat
         // splat CENTRES, and splats have extent, so a splat whose centre is just outside can
         // still poke into view; the margin also adds hysteresis against edge flicker.
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
-            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            float cullMargin, bool budgetBands, bool hysteresis, float hyst, float cullFootprintScale,
-            bool fade, float fadeWidth)
+            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, float behindPenalty,
+            bool cull, float cullMargin, bool budgetBands, bool hysteresis, float hyst,
+            float cullFootprintScale, bool fade, float fadeWidth)
         {
             if (!budgetBands) m_budgetScale = 1f;   // corrector only lives while a budget is active
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
@@ -379,6 +381,15 @@ namespace Gsplat
             // buckets, so compute it whenever there is a camera (not only in distance mode).
             Vector3 camLocal = haveCam
                 ? matrixWorld.inverse.MultiplyPoint3x4(camera.transform.position) : Vector3.zero;
+            // Behind-camera LOD penalty (PlayCanvas lodBehindPenalty): the band distance of a
+            // chunk behind the view direction is inflated by up to x`behindPenalty` (fully behind),
+            // so off-view content coarsens first and its budget flows to what is on screen. The
+            // rotation refresh gate re-evaluates the selection when the user turns around, which
+            // is the same requirement PC documents for its penalty (a non-zero lodUpdateAngle).
+            bool doBehind = doDistance && behindPenalty > 1f;
+            Vector3 fwdLocal = doBehind
+                ? matrixWorld.inverse.MultiplyVector(camera.transform.forward).normalized
+                : Vector3.forward;
             float fovScale = 1f, invLogMult = 1f;
             if (doDistance)
             {
@@ -408,6 +419,15 @@ namespace Gsplat
                     distRaw = Vector3.Distance(camLocal, closest) * scale;
                     m_chunkDist[c] = distRaw;
                     d = distRaw * fovScale;
+                    if (doBehind && distRaw > 1e-4f)
+                    {
+                        // t = how far behind the closest point is (0 = beside/ahead, 1 = dead
+                        // behind); cos of the angle to the view axis, local space. Only the LOD
+                        // band distance is penalized — m_chunkDist (balancer buckets, eviction)
+                        // stays pure distance, matching PC (their penalty scales optimalLod only).
+                        float t = -Vector3.Dot(fwdLocal, closest - camLocal) * scale / distRaw;
+                        if (t > 0f) d *= 1f + t * (behindPenalty - 1f);
+                    }
                 }
                 int req;
                 if (doDistance)
@@ -603,8 +623,9 @@ namespace Gsplat
         // the existing depth+sort+draw run over it (RemainingCount = packed count, identity
         // order). GPU holds ~budget splats instead of the whole combined buffer.
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
-            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            bool budgetBalance, float cullMargin, bool hysteresis, float hyst, float cullFootprintScale)
+            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, float behindPenalty,
+            bool cull, bool budgetBalance, float cullMargin, bool hysteresis, float hyst,
+            float cullFootprintScale)
         {
             // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
             // thresholds — the visible set is otherwise unchanged. Uses the same reliable
@@ -615,8 +636,8 @@ namespace Gsplat
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, budgetBalance, hysteresis, hyst, cullFootprintScale,
-                false, 0f);   // no LOD cross-fade in the streaming pool path (compacts whole chunks)
+                baseDistance, multiplier, behindPenalty, cull, cullMargin, budgetBalance, hysteresis, hyst,
+                cullFootprintScale, false, 0f);   // no LOD cross-fade in the streaming pool path (compacts whole chunks)
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)
@@ -802,6 +823,11 @@ namespace Gsplat
             m_propertyBlock.SetFloat(k_brightness, brightness);
             m_propertyBlock.SetFloat(k_scaleFactor, scaleFactor);
             m_propertyBlock.SetMatrix(k_matrixM, transform.localToWorldMatrix);
+
+            // Per-splat cull gates (PC minPixelSize/minContribution) as GLOBALS so the merged
+            // global draw (own material, no per-renderer block) picks them up too.
+            Shader.SetGlobalFloat(k_minPixelSize, GsplatSettings.Instance.MinPixelSize);
+            Shader.SetGlobalFloat(k_minContribution, GsplatSettings.Instance.MinContribution);
 
             uint order = Math.Clamp(renderOrder, 0, GsplatSettings.Instance.MaxRenderOrder - 1);
             var rp = new RenderParams(m_gsplatAsset.Materials[order])

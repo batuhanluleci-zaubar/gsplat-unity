@@ -14,15 +14,16 @@ bool InitSplatData(SplatSource source, float4x4 modelView, out SplatCenter cente
                    out float4 color)
 {
     float3 modelCenter = _PositionBuffer[source.id];
+    // color first: InitCorner needs the splat opacity for the contribution gate
+    color = _ColorBuffer[source.id];
+    color.rgb = color.rgb * SH_C0 + 0.5;
     if (!InitCenter(modelView, modelCenter, center))
         return false;
     float4 quat = _RotationBuffer[source.id];
     float3 scale = _ScaleBuffer[source.id];
     SplatCovariance cov = CalcCovariance(quat, scale);
-    if (!InitCorner(source, cov, center, corner))
+    if (!InitCorner(source, cov, center, color.w, corner))
         return false;
-    color = _ColorBuffer[source.id];
-    color.rgb = color.rgb * SH_C0 + 0.5;
     return true;
 }
 

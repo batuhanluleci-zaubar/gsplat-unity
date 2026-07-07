@@ -83,6 +83,16 @@ namespace Gsplat
                  "tune Chunked Lod Multiplier for aggressiveness. Live values shown in the debug panel.")]
         public bool ChunkedLodAutoRange = true;
 
+        [Tooltip("LOD penalty for chunks BEHIND the camera: their band distance is inflated up to " +
+                 "xN when fully behind (PlayCanvas lodBehindPenalty), so what you can't see coarsens " +
+                 "first and frees budget for what you can. 1 = off (the PC engine default), but every " +
+                 "PlayCanvas streamed example ships 2-5. Selection re-evaluates on the rotation " +
+                 "refresh gate, so turning around restores full quality after one refresh. Keep at 2 " +
+                 "while pool refreshes re-upload the whole pool; raise toward 3 once refills are " +
+                 "incremental.")]
+        [Range(1f, 5f)]
+        public float ChunkedBehindPenalty = 2f;
+
         // Base + multiplier actually used last frame (auto-derived/clamped or manual) — debug panel.
         [System.NonSerialized] public float m_lastEffectiveMultiplier = 3f;
         [System.NonSerialized] public float m_lastEffectiveBase = 5f;
@@ -414,13 +424,13 @@ namespace Gsplat
                     if (PoolMode)
                         m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            effBase, effMult, ChunkedCull,
+                            effBase, effMult, ChunkedBehindPenalty, ChunkedCull,
                             ChunkedBudgetBalancer, FrustumCullMargin,
                             ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            effBase, effMult, ChunkedCull, FrustumCullMargin,
+                            effBase, effMult, ChunkedBehindPenalty, ChunkedCull, FrustumCullMargin,
                             ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
                             ChunkedPerSplatCull,
                             // Fade uses the per-renderer draw shader; the global merged-draw path lacks the

@@ -98,7 +98,7 @@ bool InitGlobalSplatData(GlobalSplatSource source, out SplatCenter center, out S
     tmp.cornerUV  = source.cornerUV;
 
     SplatCovariance cov = CalcCovariance(quat, scale);
-    if (!InitCorner(tmp, cov, center, corner))
+    if (!InitCorner(tmp, cov, center, color.a, corner))
         return false;
 
     return true;

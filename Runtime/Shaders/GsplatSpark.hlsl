@@ -73,7 +73,7 @@ bool InitSplatData(SplatSource source, float4x4 modelView, out SplatCenter cente
     if (!InitCenter(modelView, modelCenter, center))
         return false;
     SplatCovariance cov = CalcCovariance(quat, scale);
-    if (!InitCorner(source, cov, center, corner))
+    if (!InitCorner(source, cov, center, color.w, corner))
         return false;
     return true;
 }

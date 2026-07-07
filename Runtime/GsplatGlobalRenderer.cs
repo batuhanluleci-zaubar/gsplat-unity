@@ -94,6 +94,8 @@ namespace Gsplat
         // Copy kernel IDs
         static readonly int k_srcUint4 = Shader.PropertyToID("_SrcUint4");
         static readonly int k_dstUint4 = Shader.PropertyToID("_DstUint4");
+        static readonly int k_minPixelSizeGlobal = Shader.PropertyToID("_GsplatMinPixelSize");
+        static readonly int k_minContributionGlobal = Shader.PropertyToID("_GsplatMinContribution");
         static readonly int k_srcUint2 = Shader.PropertyToID("_SrcUint2");
         static readonly int k_dstUint2 = Shader.PropertyToID("_DstUint2");
         static readonly int k_srcElementCount = Shader.PropertyToID("_SrcElementCount");
@@ -479,6 +481,12 @@ namespace Gsplat
             m_globalPropertyBlock.SetBuffer(k_rendererParamsProp, m_rendererParamsBuffer);
             m_globalPropertyBlock.SetInteger(k_totalSplatCount, (int)m_totalRemainingCount);
             m_globalPropertyBlock.SetInteger(k_splatInstanceSize, (int)GsplatSettings.Instance.SplatInstanceSize);
+
+            // Per-splat cull gates (PC minPixelSize/minContribution). Also set in the per-renderer
+            // Render path; repeated here because the merged draw can run without any per-renderer
+            // draw having executed this frame.
+            Shader.SetGlobalFloat(k_minPixelSizeGlobal, GsplatSettings.Instance.MinPixelSize);
+            Shader.SetGlobalFloat(k_minContributionGlobal, GsplatSettings.Instance.MinContribution);
 
             if (m_globalSHBands >= 1)
                 m_globalPropertyBlock.SetBuffer(k_globalSH1Buffer, m_globalSH1Buffer);

@@ -40,6 +40,12 @@ struct SplatCorner
 
 const float4 discardVec = float4(0.0, 0.0, 2.0, 1.0);
 
+// Per-splat cull gates (PlayCanvas minPixelSize / minContribution parity). Set as GLOBAL
+// shader floats from C# (GsplatSettings) so the per-renderer and merged/global draw paths
+// see the same values; 0 disables a gate (an unset uniform therefore fails open).
+float _GsplatMinPixelSize;     // discard splats whose projected diameter is below this many pixels
+float _GsplatMinContribution;  // discard splats with opacity * 2pi * sqrt(det(cov2D)) below this
+
 bool InitCenter(float4x4 modelView, float3 modelCenter, out SplatCenter center)
 {
     float4 centerView = mul(modelView, float4(modelCenter, 1.0));
@@ -96,7 +102,7 @@ SplatCovariance CalcCovariance(float4 quat, float3 scale)
 }
 
 // calculate the clip-space offset from the center for this gaussian
-bool InitCorner(SplatSource source, SplatCovariance covariance, SplatCenter center, out SplatCorner corner)
+bool InitCorner(SplatSource source, SplatCovariance covariance, SplatCenter center, float alpha, out SplatCorner corner)
 {
     float3 covA = covariance.covA;
     float3 covB = covariance.covB;
@@ -138,14 +144,22 @@ bool InitCorner(SplatSource source, SplatCovariance covariance, SplatCenter cent
     float lambda1 = mid + radius;
     float lambda2 = max(mid - radius, 0.1);
 
+    // cull large-but-faint gaussians: opacity * 2pi * sqrt(det) is the splat's total screen
+    // contribution (lambda1*lambda2 = det of the dilated 2D covariance). The pixel-size gate
+    // below keeps these because they are BIG; only this gate removes them.
+    if (alpha * 6.2831853 * sqrt(lambda1 * lambda2) < _GsplatMinContribution)
+    {
+        return false;
+    }
+
     // Use the smaller viewport dimension to limit the kernel size relative to the screen resolution.
     float vmin = min(1024.0, min(_ScreenParams.x, _ScreenParams.y));
 
     float l1 = 2.0 * min(sqrt(2.0 * lambda1), vmin);
     float l2 = 2.0 * min(sqrt(2.0 * lambda2), vmin);
 
-    // early-out gaussians smaller than 2 pixels
-    if (l1 < 2.0 && l2 < 2.0)
+    // early-out gaussians whose projected diameter is below the pixel-size gate
+    if (max(l1, l2) < _GsplatMinPixelSize)
     {
         return false;
     }
