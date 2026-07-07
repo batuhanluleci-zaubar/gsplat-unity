@@ -73,25 +73,41 @@ namespace Gsplat
         public static SpzData Load(string path)
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-            if (fs.Length < 4)
-                throw new InvalidDataException($"{Path.GetFileName(path)} is too short to be an SPZ file");
+            return Load(fs);
+        }
 
-            var sniff = ReadExact(fs, 4);
-            fs.Position = 0;
+        // Decode an SPZ blob already in memory — the disk-streaming path reads a per-(chunk,level)
+        // .spz file into a byte[] on a WORKER thread and decodes it here without a temp file (the
+        // whole decode is Unity-API-free). No allocation beyond the MemoryStream view.
+        public static SpzData Load(byte[] bytes)
+        {
+            using var ms = new MemoryStream(bytes, false);
+            return Load(ms);
+        }
+
+        // Core: sniff the magic and dispatch. Works on any seekable Stream (FileStream for the
+        // combined-asset path, MemoryStream for a streamed blob).
+        public static SpzData Load(Stream stream)
+        {
+            if (stream.Length < 4)
+                throw new InvalidDataException("stream is too short to be an SPZ file");
+
+            var sniff = ReadExact(stream, 4);
+            stream.Position = 0;
 
             // v1–3: single gzip stream wrapping the 16-byte SPZ header + sequential attribute streams.
-            if (sniff[0] == 0x1F && sniff[1] == 0x8B) return LoadGzip(fs);
+            if (sniff[0] == 0x1F && sniff[1] == 0x8B) return LoadGzip(stream);
 
             // v4: plaintext 32-byte header with "NGSP" magic, then optional extensions, TOC, zstd-per-attribute streams.
             uint magic = BitConverter.ToUInt32(sniff, 0);
-            if (magic == SpzMagic) return LoadZstd(fs);
+            if (magic == SpzMagic) return LoadZstd(stream);
 
             throw new NotSupportedException(
-                $"{Path.GetFileName(path)} is not a recognized SPZ file (no gzip or NGSP magic).");
+                "stream is not a recognized SPZ file (no gzip or NGSP magic).");
         }
 
         // v1–3: gzip-wrapped payload.
-        static SpzData LoadGzip(FileStream fs)
+        static SpzData LoadGzip(Stream fs)
         {
             using var gz = new GZipStream(fs, System.IO.Compression.CompressionMode.Decompress);
 
@@ -148,7 +164,7 @@ namespace Gsplat
 
         // v4: 32-byte plaintext header, optional extensions, TOC, then N zstd-compressed streams.
         // Stream order (numStreams == 6): positions, alphas, colors, scales, rotations, sh.
-        static SpzData LoadZstd(FileStream fs)
+        static SpzData LoadZstd(Stream fs)
         {
             var hb = ReadExact(fs, V4HeaderSize);
             uint magic = BitConverter.ToUInt32(hb, 0);
