@@ -5,6 +5,7 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using Unity.Mathematics;
 using UnityEngine;
 
 namespace Gsplat
@@ -97,7 +98,8 @@ namespace Gsplat
                     () => (min: Vector3.positiveInfinity, max: Vector3.negativeInfinity),
                     (i, _, localBounds) =>
                     {
-                        var position = DecodeSplatIntoPackedArrays(i, in ctx, tlShBand.Value);
+                        var position = DecodeSplatInto(i, in ctx, tlShBand.Value,
+                            PackedSplats, PackedSH1, PackedSH2, PackedSH3, PackedSH4);
                         localBounds.min = Vector3.Min(localBounds.min, position);
                         localBounds.max = Vector3.Max(localBounds.max, position);
 
@@ -143,9 +145,66 @@ namespace Gsplat
             };
         }
 
-        // Decodes one SPZ splat and writes it into PackedSplats / PackedSH1..3.
-        // Returns the world-space position so the caller can extend its bounds reduction.
-        Vector3 DecodeSplatIntoPackedArrays(int i, in DecodeContext ctx, float[] shBandData)
+        // GPU-ready packed result of decoding one standalone SPZ blob (disk-streaming path).
+        // Same packed layout the pool/renderer consume; arrays are plain managed (no ScriptableObject),
+        // so decoding runs on a worker thread. A null SH array means that band is absent.
+        public struct BlobPacked
+        {
+            public uint4[] Packed;             // Count entries (word0 color, word1/2 f16 pos, word3 scale+quat)
+            public uint[] SH1, SH2, SH3, SH4;  // 2/4/4/4 uint per splat when the band is present
+            public int Count;
+            public byte ShBands;
+            public Bounds Bounds;
+        }
+
+        // Decode a standalone SPZ blob (a per-(chunk,level) .spz from the streaming container) into
+        // plain packed arrays, entirely off the main thread (SpzLoader.Load(byte[]) + the same
+        // per-splat pack path used by the combined load). No Unity Object, no temp file, no
+        // progress poll / Thread.Sleep. Safe to call from Task.Run.
+        public static BlobPacked DecodeBlobToPacked(byte[] spz,
+            SourceCoordinates sourceCoordinates = SourceCoordinates.RUB)
+        {
+            var data = SpzLoader.Load(spz);
+            var h = data.Header;
+            if (h.ShDegree > 4)
+                throw new NotSupportedException($"SPZ SH degree {h.ShDegree} is not supported (max 4)");
+            int n = (int)h.NumPoints;
+            byte shBands = h.ShDegree;
+            var r = new BlobPacked
+            {
+                Count = n,
+                ShBands = shBands,
+                Packed = new uint4[n],
+                SH1 = shBands >= 1 ? new uint[n * 2] : null,
+                SH2 = shBands >= 2 ? new uint[n * 4] : null,
+                SH3 = shBands >= 3 ? new uint[n * 4] : null,
+                SH4 = shBands >= 4 ? new uint[n * 4] : null,
+            };
+            var ctx = new DecodeContext(data, sourceCoordinates, shBands);
+            var tlShBand = new ThreadLocal<float[]>(() => new float[9 * 3]);
+            Vector3 gMin = Vector3.positiveInfinity, gMax = Vector3.negativeInfinity;
+            var boundsLock = new object();
+            Parallel.For(0, n,
+                () => (min: Vector3.positiveInfinity, max: Vector3.negativeInfinity),
+                (i, _, lb) =>
+                {
+                    var pos = DecodeSplatInto(i, in ctx, tlShBand.Value, r.Packed, r.SH1, r.SH2, r.SH3, r.SH4);
+                    lb.min = Vector3.Min(lb.min, pos);
+                    lb.max = Vector3.Max(lb.max, pos);
+                    return lb;
+                },
+                lb => { lock (boundsLock) { gMin = Vector3.Min(gMin, lb.min); gMax = Vector3.Max(gMax, lb.max); } });
+            tlShBand.Dispose();
+            r.Bounds = n > 0 ? new Bounds((gMin + gMax) * 0.5f, gMax - gMin) : default;
+            return r;
+        }
+
+        // Decodes one SPZ splat and writes it into the given packed arrays (band arrays may be null
+        // when absent). Returns the world-space position for bounds reduction. Pure managed math —
+        // no Unity API — so it is shared by the combined LoadFromSpz and the streaming
+        // DecodeBlobToPacked, and runs on worker threads.
+        static Vector3 DecodeSplatInto(int i, in DecodeContext ctx, float[] shBandData,
+            uint4[] packed, uint[] sh1, uint[] sh2, uint[] sh3, uint[] sh4)
         {
             var rawPos = ctx.Float16Pos
                 ? SpzLoader.DecodePositionFloat16(ctx.Data.Positions, i)
@@ -164,7 +223,7 @@ namespace Gsplat
                 ctx.RotYSign * rawRot.y,
                 ctx.RotZSign * rawRot.z);
 
-            PackedSplats[i] = PackSplat(color, position, scale, rotation);
+            packed[i] = PackSplat(color, position, scale, rotation);
 
             for (int j = 1, bandOffset = 0; j <= ctx.ShBands; j++)
             {
@@ -179,10 +238,10 @@ namespace Gsplat
                     shBandData[k * 3 + 2] = sign * SpzLoader.UnquantizeSH(ctx.Data.SH, off + 2);
                 }
 
-                if (j == 1) PackSH1(shBandData, PackedSH1.AsSpan(i * 2, 2));
-                if (j == 2) PackSH2(shBandData, PackedSH2.AsSpan(i * 4, 4));
-                if (j == 3) PackSH3(shBandData, PackedSH3.AsSpan(i * 4, 4));
-                if (j == 4) PackSH4(shBandData, PackedSH4.AsSpan(i * 4, 4));
+                if (j == 1) PackSH1(shBandData, sh1.AsSpan(i * 2, 2));
+                if (j == 2) PackSH2(shBandData, sh2.AsSpan(i * 4, 4));
+                if (j == 3) PackSH3(shBandData, sh3.AsSpan(i * 4, 4));
+                if (j == 4) PackSH4(shBandData, sh4.AsSpan(i * 4, 4));
 
                 bandOffset += bandSize;
             }
