@@ -134,17 +134,18 @@ namespace Gsplat
         }
 
         public override void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv,
-            ISorterResource sorterResource, GsplatResource resource)
+            ISorterResource sorterResource, GsplatResource resource, uint count)
         {
+            if (count == 0) return;
             var res = (GsplatResourceSpark)resource;
             var cs = GsplatMaterial.CalcDepthShader;
             const int kernelCalcDepthSpark = 0;
-            cmd.SetComputeIntParam(cs, k_splatCount, (int)res.UploadedCount);
+            cmd.SetComputeIntParam(cs, k_splatCount, (int)count);
             cmd.SetComputeMatrixParam(cs, k_matrixMv, matrixMv);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSplatsBuffer, res.PackedSplatsBuffer);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_depthBuffer, sorterResource.InputKeys);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_orderBuffer, sorterResource.OrderBuffer);
-            cmd.DispatchCompute(cs, kernelCalcDepthSpark, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
+            cmd.DispatchCompute(cs, kernelCalcDepthSpark, (int)GsplatUtils.DivRoundUp(count, 1024), 1, 1);
         }
 
         public override void InitOrder(ISorterResource sorterResource, GsplatResource resource, bool updateBounds)

@@ -12,11 +12,13 @@
 #define GROUP_SIZE 1024
 
 #pragma kernel InitOrderChunked
+#pragma kernel InitOrderPool
 #pragma multi_compile __ FRUSTUM_CULL
 
 uint _SplatCount;                          // combined buffer splat count
 
 AppendStructuredBuffer<uint> _OrderBuffer;
+StructuredBuffer<uint> _PoolLiveMask;      // InitOrderPool: bit per pool slot, 1 = live splat
 StructuredBuffer<uint4> _PackedSplatsBuffer;
 StructuredBuffer<uint>  _SplatChunk;       // per-splat: (chunkId << 4) | level (level 0..15)
 StructuredBuffer<uint>  _SelectedLevel;    // per-chunk chosen level; 0xFFFFFFFF = chunk culled
@@ -83,4 +85,18 @@ void InitOrderChunked(uint3 id : SV_DispatchThreadID)
 #endif
 
     _OrderBuffer.Append(idx);
+}
+
+// Streaming-pool visible-set builder (incremental refill). The pool buffer holds resident
+// chunk blocks at allocator-chosen offsets with HOLES between them (stale data from freed
+// blocks). Append only the slots the CPU-side allocator marked live — holes never reach the
+// sort/draw. _SplatCount here = the allocator's UsedEnd (highest allocated end).
+[numthreads(GROUP_SIZE, 1, 1)]
+void InitOrderPool(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+    if ((_PoolLiveMask[idx >> 5u] >> (idx & 31u)) & 1u)
+        _OrderBuffer.Append(idx);
 }

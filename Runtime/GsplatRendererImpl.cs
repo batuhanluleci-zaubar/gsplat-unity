@@ -43,6 +43,7 @@ namespace Gsplat
         static readonly int k_lodFadeEnabled = Shader.PropertyToID("_LodFadeEnabled");
         static readonly int k_minPixelSize = Shader.PropertyToID("_GsplatMinPixelSize");
         static readonly int k_minContribution = Shader.PropertyToID("_GsplatMinContribution");
+        static readonly int k_poolLiveMask = Shader.PropertyToID("_PoolLiveMask");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -73,6 +74,12 @@ namespace Gsplat
         uint[] m_selectedLevel;
         GraphicsBuffer m_fadeWeightBuffer;      // per-chunk LOD cross-fade weight 0..255 (0 = no fade)
         uint[] m_fadeWeight;
+
+        // P1.3 incremental pool refill (streaming pool mode): CPU-side block allocator mirroring
+        // the pool buffers + per-slot liveness bitmask consumed by the InitOrderPool kernel.
+        GsplatChunkPool.Layout m_poolLayout;
+        GsplatChunkTable m_poolTable;           // table the layout was built against
+        GraphicsBuffer m_poolLiveMaskBuffer;
         readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
         // R3 budget-balancer scratch (see ApplyBudgetBalancer). Per-chunk camera distance +
@@ -122,7 +129,15 @@ namespace Gsplat
         }
 
         public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv) =>
-            m_gsplatAsset.ComputeDepth(cmd, matrixMv, SorterResource, GsplatResource);
+            // Depth is only consumed for the first RemainingCount order entries (the sort
+            // Count); bounding the dispatch to it also keeps the incremental pool path off
+            // undefined order entries in [LiveCount, UsedEnd) — an out-of-bounds-INDEX
+            // structured read that is benign on desktop but relies on robustBufferAccess
+            // on mobile (Adreno).
+            m_gsplatAsset.ComputeDepth(cmd, matrixMv, SorterResource, GsplatResource,
+                System.Math.Min(m_remainingCount, GsplatResource.UploadedCount));
+
+        public int PoolRepackCount => m_poolLayout?.RepackCount ?? 0;
 
         Bounds ExtractBounds()
         {
@@ -620,21 +635,32 @@ namespace Gsplat
             return (int)total;
         }
 
-        // R4 streaming pool: rebuild the visible set on refresh by compacting only the
-        // selected chunk-levels into the budget-sized pool resource (from CPU RAM), then let
-        // the existing depth+sort+draw run over it (RemainingCount = packed count, identity
-        // order). GPU holds ~budget splats instead of the whole combined buffer.
-        public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
-            bool distanceLod, int fixedLevel, float baseDistance, float multiplier, float behindPenalty,
-            bool cull, bool budgetBalance, float cullMargin, bool hysteresis, float hyst,
-            float cullFootprintScale)
+        // R4 streaming pool: rebuild the visible set on refresh, then let the existing
+        // depth+sort+draw run over it. GPU holds ~budget splats instead of the whole combined
+        // buffer. Two refill strategies (P1.3):
+        //  - incremental (default): allocator keeps resident blocks in place; a refresh uploads
+        //    ONLY entering/level-changed chunks. Holes are skipped by the InitOrderPool kernel
+        //    (appended order, RemainingCount known CPU-side — no readback).
+        //  - legacy full re-pack (debug baseline; forced while the global merged sort is active,
+        //    which assumes a contiguous identity-layout pool).
+        public void DispatchChunkedPool(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
+            Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
+            float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
+            float hyst, float cullFootprintScale, bool incrementalRefill)
         {
-            // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
-            // thresholds — the visible set is otherwise unchanged. Uses the same reliable
-            // camera-move check as the frustum path, NOT the ComputeCutoutsRequired gate
-            // (which stuck the selection at the first fill). m_remainingCount==0 forces the
-            // first fill; keep the last cull pose so tiny per-frame jitter doesn't rebuild.
-            if (m_remainingCount > 0 && camera != null && !CameraMovedSinceLastCull(camera))
+            bool useIncremental = incrementalRefill && cs != null &&
+                                  !GsplatSorter.Instance.GlobalRenderEnabled;
+            // A holey pool is only valid while the incremental path (InitOrderPool) draws it.
+            // If the mode flipped (toggle off, global sort turned on), force a contiguous
+            // repack NOW instead of waiting for the camera gate.
+            bool mustRepack = !useIncremental && m_poolLayout is { Holey: true };
+
+            // Refresh only when the camera moved past the refresh thresholds — the visible set
+            // is otherwise unchanged. Uses the same reliable camera-move check as the frustum
+            // path, NOT the ComputeCutoutsRequired gate (which stuck the selection at the first
+            // fill). m_remainingCount==0 forces the first fill; keep the last cull pose so tiny
+            // per-frame jitter doesn't rebuild.
+            if (!mustRepack && m_remainingCount > 0 && camera != null && !CameraMovedSinceLastCull(camera))
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
@@ -644,10 +670,59 @@ namespace Gsplat
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)
                 ? ApplyBudgetBalancer(table, (int)SplatCount) : 0;
-            uint visible = GsplatChunkPool.Fill((GsplatResourceSpark)GsplatResource,
-                (GsplatAssetSpark)m_gsplatAsset, table, m_selectedLevel, out m_poolOverflow);
-            m_remainingCount = visible;
-            SorterResource.Initialized = false;   // re-fill identity order for the new pool contents
+
+            uint visible;
+            if (useIncremental)
+            {
+                m_poolLayout ??= new GsplatChunkPool.Layout();
+                if (!ReferenceEquals(m_poolTable, table))
+                {
+                    m_poolLayout.Reset(0);   // chunk ids changed — residency map is meaningless
+                    m_poolTable = table;
+                }
+                visible = GsplatChunkPool.FillIncremental((GsplatResourceSpark)GsplatResource,
+                    (GsplatAssetSpark)m_gsplatAsset, table, m_selectedLevel, m_poolLayout,
+                    out m_poolOverflow);
+
+                var mask = m_poolLayout.LiveMask;
+                if (m_poolLiveMaskBuffer == null || m_poolLiveMaskBuffer.count != mask.Length)
+                {
+                    m_poolLiveMaskBuffer?.Dispose();
+                    m_poolLiveMaskBuffer = mask.Length > 0
+                        ? new GraphicsBuffer(GraphicsBuffer.Target.Structured, mask.Length, sizeof(uint))
+                        : null;
+                    m_poolLayout.MaskDirty = mask.Length > 0;
+                }
+                if (m_poolLayout.MaskDirty && m_poolLiveMaskBuffer != null)
+                {
+                    m_poolLiveMaskBuffer.SetData(mask);
+                    m_poolLayout.MaskDirty = false;
+                }
+
+                // Rebuild the appended visible order from the liveness mask. RemainingCount is
+                // known CPU-side (allocator LiveCount) — no counter readback needed.
+                SorterResource.OrderBuffer.SetCounterValue(0);
+                if (m_poolLayout.UsedEnd > 0 && m_poolLiveMaskBuffer != null)
+                {
+                    int kernel = cs.FindKernel("InitOrderPool");
+                    cs.SetInt(k_splatCount, m_poolLayout.UsedEnd);
+                    cs.SetBuffer(kernel, k_orderBuffer, SorterResource.OrderBuffer);
+                    cs.SetBuffer(kernel, k_poolLiveMask, m_poolLiveMaskBuffer);
+                    cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp((uint)m_poolLayout.UsedEnd, 1024), 1, 1);
+                }
+                m_remainingCount = visible;
+                SorterResource.Initialized = true;   // the appended subset IS the sort payload;
+                                                     // identity InitPayload must not overwrite it
+            }
+            else
+            {
+                m_poolLayout?.Reset(0);   // GPU contents will no longer match the layout
+                visible = GsplatChunkPool.Fill((GsplatResourceSpark)GsplatResource,
+                    (GsplatAssetSpark)m_gsplatAsset, table, m_selectedLevel, out m_poolOverflow);
+                m_remainingCount = visible;
+                SorterResource.Initialized = false;   // re-fill identity order for the new pool contents
+            }
+
             m_bounds = m_gsplatAsset.Bounds;
             if (camera != null)
             {
@@ -690,6 +765,15 @@ namespace Gsplat
             {
                 GsplatResourceManager.Release(m_gsplatAssetID);
             }
+            // P1.3: the allocator layout mirrors the pool buffers being released; a stale layout
+            // over a freshly-recreated resource would skip every "resident" upload and draw
+            // undefined GPU memory PERSISTENTLY (incremental never self-heals, unlike the legacy
+            // full re-pack). Triggered by asset rebind with unchanged capacity — e.g.
+            // GsplatImporter.ReloadAsset() during Play. Invalidate on every release; zeroing
+            // m_remainingCount also defeats the camera-gate early return over the stale order.
+            m_poolLayout?.Reset(0);
+            m_poolTable = null;
+            m_remainingCount = 0;
             GsplatResource = null;
             m_gsplatAsset = null;
             m_gsplatAssetID = 0;
@@ -733,6 +817,10 @@ namespace Gsplat
             m_fadeWeightBuffer?.Dispose();
             m_fadeWeightBuffer = null;
             m_chunkTable = null;
+            m_poolLiveMaskBuffer?.Dispose();
+            m_poolLiveMaskBuffer = null;
+            m_poolLayout = null;
+            m_poolTable = null;
         }
 
         public void ForceRefresh()

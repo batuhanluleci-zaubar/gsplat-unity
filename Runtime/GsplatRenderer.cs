@@ -129,6 +129,15 @@ namespace Gsplat
         [Min(1000)]
         public int ChunkedPoolBudget = 2_000_000;
 
+        [Tooltip("Incremental pool refill (PlayCanvas BlockAllocator analogue): each refresh " +
+                 "uploads ONLY chunks whose selected LOD changed instead of re-uploading the " +
+                 "entire pool (tens of MB of SetData every time the camera crosses the " +
+                 "0.2 m/10° gate — XR head motion crosses it constantly). Falls back to a full " +
+                 "contiguous repack automatically when the pool fragments and while the global " +
+                 "merged sort is active (it assumes a contiguous pool). Off = legacy full " +
+                 "re-pack every refresh (debug baseline).")]
+        public bool ChunkedIncrementalRefill = true;
+
         [Tooltip("R3 budget balancer: fit the per-chunk LOD selection into ChunkedPoolBudget by " +
                  "degrading the farthest chunks first (and upgrading the nearest when there is " +
                  "headroom), so the drawn splat total is bounded for stable frame time. " +
@@ -187,8 +196,12 @@ namespace Gsplat
         public uint[] ChunkedSelectedLevels => m_renderer?.SelectedLevels;
         // Splats dropped past the pool capacity on the last Fill (0 = the balancer fit budget).
         public uint ChunkedPoolOverflow => m_renderer?.m_poolOverflow ?? 0;
+        // Full contiguous repacks of the incremental pool (fragmentation telemetry; each costs a
+        // legacy-style full re-upload — frequent repacks under motion = raise ChunkedPoolBudget).
+        public int ChunkedPoolRepacks => m_renderer?.PoolRepackCount ?? 0;
 
         GsplatAsset m_prevAsset;
+        bool m_wasPoolMode;
         GsplatRendererImpl m_renderer;
 
         // Streaming pool mode: budget-resident, populated per frame — only in Play with a
@@ -346,6 +359,16 @@ namespace Gsplat
         {
             if (!GsplatAsset)
                 m_prevAsset = null;
+            // Flipping pool mode at runtime (ChunkedLod/ChunkedStreaming toggled, ChunkTable
+            // set/nulled) must force a full rebind: the pool resource holds only the resident
+            // subset (with HOLES in incremental mode) while the non-pool paths assume a fully
+            // uploaded asset — drawing one through the other renders stale/undefined splats.
+            bool poolModeNow = PoolMode;
+            if (m_wasPoolMode != poolModeNow)
+            {
+                m_prevAsset = null;
+                m_wasPoolMode = poolModeNow;
+            }
             if (m_prevAsset != GsplatAsset)
             {
                 m_renderer?.ReleaseGsplatAsset();
@@ -422,11 +445,13 @@ namespace Gsplat
                     m_lastEffectiveBase = effBase;
                     m_lastEffectiveMultiplier = effMult;
                     if (PoolMode)
-                        m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
+                        m_renderer.DispatchChunkedPool(m_chunkTableParsed, InitOrderChunkedShader,
+                            transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             effBase, effMult, ChunkedBehindPenalty, ChunkedCull,
                             ChunkedBudgetBalancer, FrustumCullMargin,
-                            ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale);
+                            ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
+                            ChunkedIncrementalRefill);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,

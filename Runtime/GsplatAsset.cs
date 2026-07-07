@@ -201,8 +201,10 @@ namespace Gsplat
 
         public abstract void SetupMaterialPropertyBlock(MaterialPropertyBlock propertyBlock, GsplatResource resource);
 
+        // `count` = how many leading order entries need depth keys (the sort Count, i.e. the
+        // renderer's RemainingCount); entries beyond it are never consumed by the radix sort.
         public abstract void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv,
-            ISorterResource sorterResource, GsplatResource resource);
+            ISorterResource sorterResource, GsplatResource resource, uint count);
 
         public abstract void InitOrder(ISorterResource sorterResource, GsplatResource resource,
             bool updateBounds);
