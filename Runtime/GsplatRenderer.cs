@@ -63,7 +63,10 @@ namespace Gsplat
                  "base*mult^i). Off = draw the fixed level below for every chunk (debug).")]
         public bool ChunkedDistanceLod = true;
 
-        [Tooltip("Distance (world units) within which a chunk draws its finest level (LOD0).")]
+        [Tooltip("Distance (world units) within which a chunk draws its finest level (LOD0). " +
+                 "WARNING: setting this ≥ the scene size collapses everything to LOD0 (distance-" +
+                 "LOD disabled). When Chunked Lod Auto Range is on it is CLAMPED to a safe near-" +
+                 "shell so a too-large value can't defeat the ladder.")]
         [Min(0.01f)]
         public float ChunkedLodBaseDistance = 5f;
 
@@ -79,8 +82,9 @@ namespace Gsplat
                  "Chunked Lod Multiplier. Live value shown in the debug panel.")]
         public bool ChunkedLodAutoRange = true;
 
-        // Multiplier actually used last frame (auto-derived or manual) — for the debug panel.
+        // Base + multiplier actually used last frame (auto-derived/clamped or manual) — debug panel.
         [System.NonSerialized] public float m_lastEffectiveMultiplier = 3f;
+        [System.NonSerialized] public float m_lastEffectiveBase = 5f;
 
         [Tooltip("Fixed global LOD level when distance LOD is off (0 = finest).")]
         [Min(0)]
@@ -342,29 +346,39 @@ namespace Gsplat
                     }
                     // Scene-adaptive LOD range: a fixed multiplier (e.g. 3) spreads the ladder far
                     // beyond a compact scene so only LOD0-2 are ever reachable by distance. When
-                    // ChunkedLodAutoRange is on, derive the multiplier so LOD maxLod lands at the
-                    // scene's diagonal — the full ladder maps onto the actual view distances as a
-                    // smooth near→far gradient, for any scene size / LOD count. Overrides the
-                    // manual ChunkedLodMultiplier.
+                    // ChunkedLodAutoRange is on, derive BOTH the LOD0 near-shell (base) and the
+                    // step (multiplier) so the full ladder maps onto the scene as a near→far
+                    // gradient. Overrides the manual ChunkedLodMultiplier and CLAMPS the base.
+                    //
+                    // Why the base MUST be clamped: the band test is `d < base ? LOD0 : …`, so a
+                    // base ≥ the scene diagonal collapses the WHOLE scene into the LOD0 shell —
+                    // distance-LOD is silently defeated and only the budget balancer (far-first)
+                    // coarsens anything, which reads as "inverted" (far looks high quality). We cap
+                    // the base at diag/1.3^(maxLod-1) so the ladder always spans the scene with at
+                    // least a 1.3× step, even if the authored base is pathologically large.
+                    float effBase = ChunkedLodBaseDistance;
                     float effMult = ChunkedLodMultiplier;
                     if (ChunkedLodAutoRange && m_chunkTableParsed.MaxLod > 1)
                     {
+                        int maxLod = m_chunkTableParsed.MaxLod;
                         float diag = m_chunkTableParsed.Bounds.size.magnitude;
-                        float b = Mathf.Max(0.01f, ChunkedLodBaseDistance);
+                        float baseCap = diag / Mathf.Pow(1.3f, maxLod - 1);          // LOD0-shell ceiling
+                        effBase = Mathf.Clamp(ChunkedLodBaseDistance, 0.01f, baseCap);
                         effMult = Mathf.Max(1.2f,
-                            Mathf.Pow(Mathf.Max(1.001f, diag / b), 1f / (m_chunkTableParsed.MaxLod - 1)));
+                            Mathf.Pow(Mathf.Max(1.001f, diag / effBase), 1f / (maxLod - 1)));
                     }
+                    m_lastEffectiveBase = effBase;
                     m_lastEffectiveMultiplier = effMult;
                     if (PoolMode)
                         m_renderer.DispatchChunkedPool(m_chunkTableParsed, transform.localToWorldMatrix,
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            ChunkedLodBaseDistance, effMult, ChunkedCull,
+                            effBase, effMult, ChunkedCull,
                             ChunkedBudgetBalancer, FrustumCullMargin,
                             ChunkedLodHysteresis, ChunkedHysteresis);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
-                            ChunkedLodBaseDistance, effMult, ChunkedCull, FrustumCullMargin,
+                            effBase, effMult, ChunkedCull, FrustumCullMargin,
                             ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis);
                 }
                 else
