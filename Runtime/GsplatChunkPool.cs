@@ -165,6 +165,83 @@ namespace Gsplat
             if (shBands >= 4) res.PackedSH4Buffer.SetData(asset.PackedSH4, 4 * srcOff, 4 * dstOff, 4 * cnt);
         }
 
+        // Disk-streaming variant (S4): upload a freshly-decoded per-(chunk,level) blob into a pool
+        // slot. Same SetData seam as UploadBlock but src is the standalone blob (srcOff = 0, each
+        // blob's index space starts at 0) instead of an absolute offset into a full-asset array.
+        static void UploadBlobPacked(GsplatResourceSpark res, in GsplatAssetSpz.BlobPacked blob,
+            byte shBands, int dstOff)
+        {
+            int cnt = blob.Count;
+            res.PackedSplatsBuffer.SetData(blob.Packed, 0, dstOff, cnt);
+            if (shBands >= 1) res.PackedSH1Buffer.SetData(blob.SH1, 0, 2 * dstOff, 2 * cnt);
+            if (shBands >= 2) res.PackedSH2Buffer.SetData(blob.SH2, 0, 4 * dstOff, 4 * cnt);
+            if (shBands >= 3) res.PackedSH3Buffer.SetData(blob.SH3, 0, 4 * dstOff, 4 * cnt);
+            if (shBands >= 4) res.PackedSH4Buffer.SetData(blob.SH4, 0, 4 * dstOff, 4 * cnt);
+        }
+
+        // Disk-streaming fill (S4): the RAM-bounded path. Instead of copying resident blocks from a
+        // full-asset CPU array, it (0) drains completed async loads into pool slots, (1) frees
+        // culled chunks — but KEEPS a resident coarser level until its finer replacement lands
+        // (make-before-break, no black holes), and (2) requests loads for selected chunk-levels not
+        // yet resident. Nothing here blocks: unloaded chunks simply stay pending and appear on a
+        // later Drain. On Allocate failure it DEFERS (retries next refresh) rather than the sync
+        // whole-pool RepackContiguous the RAM path uses — that would require every blob CPU-resident
+        // at once, the opposite of streaming. Returns the resident (drawn) splat total; `pending` =
+        // selected chunk-levels still loading.
+        public static uint FillStreaming(GsplatResourceSpark res, GsplatChunkTable table,
+            uint[] selectedLevel, Layout layout, GsplatStreamingLoader loader, byte shBands,
+            out uint overflow, out int pending)
+        {
+            int capacity = res.PackedSplatsBuffer.count;
+            if (layout.Capacity != capacity) layout.Reset(capacity);
+            ulong over = 0;
+
+            // Phase 0: apply completed loads. Only if still selected at that level; make-before-break
+            // swap (free the old coarser level only after the new one is committed).
+            loader.Drain(loaded =>
+            {
+                int c = loaded.Chunk, l = loaded.Level;
+                uint sel = c < selectedLevel.Length ? selectedLevel[c] : 0xFFFFFFFFu;
+                if (sel != (uint)l) return;                                   // selection moved on — discard
+                if (layout.Resident.TryGetValue(c, out var cur) && cur.Level == l) return; // already have it
+                if (loaded.Blob.Count <= 0) return;
+                int off = layout.Allocate(loaded.Blob.Count);
+                if (off < 0) { over += (ulong)loaded.Blob.Count; return; }    // no room now — dropped, will re-request
+                UploadBlobPacked(res, in loaded.Blob, shBands, off);
+                if (layout.Resident.ContainsKey(c)) layout.FreeBlock(c);      // swap out the stale level
+                layout.Commit(c, l, off, loaded.Blob.Count);
+            });
+
+            // Phase 1: free CULLED chunks (not selected at all). Level-mismatch chunks are KEPT
+            // (their coarser level keeps drawing until the finer load lands — make-before-break).
+            var toFree = layout.Scratch();
+            foreach (var kv in layout.Resident)
+            {
+                int c = kv.Key;
+                uint sel = c < selectedLevel.Length ? selectedLevel[c] : 0xFFFFFFFFu;
+                if (sel == 0xFFFFFFFFu) toFree.Add(c);
+            }
+            for (int i = 0; i < toFree.Count; i++) layout.FreeBlock(toFree[i]);
+
+            // Phase 2: request loads for selected chunk-levels not resident at the selected level.
+            int pend = 0;
+            for (int c = 0; c < table.ChunkCount; c++)
+            {
+                uint lvl = c < selectedLevel.Length ? selectedLevel[c] : 0xFFFFFFFFu;
+                if (lvl == 0xFFFFFFFFu || lvl >= (uint)table.Chunks[c].Lods.Length) continue;
+                var iv = table.Chunks[c].Lods[(int)lvl];
+                if (iv.Count <= 0 || iv.StreamPath == null) continue;
+                if (layout.Resident.TryGetValue(c, out var b) && b.Level == (int)lvl) continue; // already resident at level
+                loader.Request(c, (int)lvl, iv.StreamPath);                   // deduped inside the loader
+                pend++;
+            }
+
+            res.UploadedCount = (uint)layout.UsedEnd;
+            overflow = (uint)System.Math.Min(over, uint.MaxValue);
+            pending = pend;
+            return (uint)layout.LiveCount;
+        }
+
         // Incremental fill: diff the selected (chunk,level) set against what is already resident;
         // upload only entering/level-changed chunks, free leaving ones in place. Chunks are placed
         // WHOLE — a chunk that doesn't fit counts toward `overflow` (the balancer should keep the
