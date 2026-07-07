@@ -379,6 +379,12 @@ namespace Gsplat
                 m_selectedLevel = new uint[table.ChunkCount];
                 for (int i = 0; i < m_selectedLevel.Length; i++) m_selectedLevel[i] = 0xFFFFFFFFu;
             }
+            // m_fadeWeight is written UNCONDITIONALLY below (:476), but EnsureChunkSetup — which
+            // allocates it — only runs on the combined (InitOrderChunked) path. The streaming-pool
+            // path (DispatchChunkedPool) calls this directly, so allocate here too or it NREs every
+            // frame (authored-from-start pool would never fill → black render). B1 root cause.
+            if (m_fadeWeight == null || m_fadeWeight.Length != table.ChunkCount)
+                m_fadeWeight = new uint[table.ChunkCount];
             if (m_chunkDist == null || m_chunkDist.Length != table.ChunkCount)
             {
                 m_chunkDist = new float[table.ChunkCount];
@@ -796,6 +802,15 @@ namespace Gsplat
             m_propertyBlock ??= new MaterialPropertyBlock();
             m_propertyBlock.SetBuffer(k_orderBuffer, OrderBuffer);
             m_propertyBlock.SetFloat(k_lodFadeEnabled, 0f);   // off until the chunked path enables it
+            // The draw shader DECLARES _SplatChunk/_SelectedLevel/_FadeWeight (read only when
+            // _LodFadeEnabled>0.5). Metal (and other strict backends) reject a draw whose declared
+            // StructuredBuffers are UNBOUND — producing ZERO fragments even though they're never
+            // dynamically read. The combined chunked path binds real ones; the streaming-pool and
+            // non-chunked paths never did → black render. Bind a valid dummy (OrderBuffer, itself a
+            // StructuredBuffer<uint>) so no draw path is ever left with an unbound fade buffer.
+            m_propertyBlock.SetBuffer(k_splatChunkBuffer, OrderBuffer);
+            m_propertyBlock.SetBuffer(k_selectedLevelBuffer, OrderBuffer);
+            m_propertyBlock.SetBuffer(k_fadeWeightBuffer, OrderBuffer);
         }
 
         public void Dispose()
