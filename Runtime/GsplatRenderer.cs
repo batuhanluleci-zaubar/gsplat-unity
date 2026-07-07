@@ -70,16 +70,17 @@ namespace Gsplat
         [Min(0.01f)]
         public float ChunkedLodBaseDistance = 5f;
 
-        [Tooltip("Each successive LOD band is this many times farther (PlayCanvas default 3). " +
-                 "IGNORED when Chunked Lod Auto Range is on.")]
+        [Tooltip("Distance multiplier between successive LOD bands. 2.0 = SSE-correct (one level per " +
+                 "distance doubling, crisp near, far tops out ~LOD4-6 in a compact scene). Lower it " +
+                 "toward ~1.35 to map ALL levels onto the scene and push far corners to the coarsest " +
+                 "LODs 7-11 (cheapest, but coarse levels creep into the near field = blobbier up " +
+                 "close). Respected whether or not Auto Range is on; only the BASE is auto-guarded.")]
         [Min(1.01f)]
-        public float ChunkedLodMultiplier = 3f;
+        public float ChunkedLodMultiplier = 2f;
 
-        [Tooltip("Auto-fit the LOD ladder to the scene: derive the multiplier so the coarsest " +
-                 "level lands at the scene diagonal, mapping ALL levels onto the actual view " +
-                 "distances as a near→far gradient. A fixed multiplier stretches the ladder past " +
-                 "a compact scene (only LOD0-2 reachable). On by default; overrides " +
-                 "Chunked Lod Multiplier. Live value shown in the debug panel.")]
+        [Tooltip("Clamp the LOD base distance to a safe near-shell (diag/4) so a too-large authored " +
+                 "base can't collapse the scene into the LOD0 shell. Does NOT touch the multiplier — " +
+                 "tune Chunked Lod Multiplier for aggressiveness. Live values shown in the debug panel.")]
         public bool ChunkedLodAutoRange = true;
 
         // Base + multiplier actually used last frame (auto-derived/clamped or manual) — debug panel.
@@ -385,19 +386,29 @@ namespace Gsplat
                     // coarsened by distance (≈LOD4 at 30–43 m) AND the strict far-first budget
                     // balancer (2 M ceiling vs 9.65 M LOD0 total).
                     //
-                    // AutoRange is still ON only to keep the base≥diagonal GUARD: the band test is
-                    // `d < base ? LOD0 : …`, so a base ≥ the scene diagonal would collapse the whole
-                    // scene into the LOD0 shell (the old "inverted, far looks best" bug). We cap the
-                    // base at diag/4 (soft — the authored 5 m passes through on this 43 m scene) so a
-                    // pathologically large authored base can never defeat distance-LOD.
+                    // AutoRange now ONLY guards the base (see below) and otherwise RESPECTS the
+                    // authored ChunkedLodMultiplier, so the LOD aggressiveness is an inspector knob:
+                    //   • mult = 2.0  → SSE-correct: one level per distance DOUBLING. Near stays crisp
+                    //                   (7 m wall → LOD1); in a compact scene the far field only reaches
+                    //                   ~LOD4-6, because higher levels need hundreds of metres.
+                    //   • mult ≈ 1.35 → "fill the scene": all levels map onto the diagonal, so far
+                    //                   corners reach the COARSEST LODs (7-11). Cheapest, but coarse
+                    //                   levels creep into the near field (blobbier up close) — that is
+                    //                   the SSE tradeoff, chosen deliberately when you want far chunks
+                    //                   as light as possible. For N levels over a diagonal D from base
+                    //                   B, the fill value is (D/B)^(1/(N-1)).
+                    // The base is still CLAMPED to diag/4: the band test is `d < base ? LOD0 : …`, so a
+                    // base ≥ the scene diagonal would collapse everything into the LOD0 shell (the old
+                    // "inverted, far looks best" bug). A pathologically large authored base can never
+                    // defeat distance-LOD, but the multiplier is yours to tune.
                     float effBase = ChunkedLodBaseDistance;
                     float effMult = ChunkedLodMultiplier;
                     if (ChunkedLodAutoRange && m_chunkTableParsed.MaxLod > 1)
                     {
                         float diag = m_chunkTableParsed.Bounds.size.magnitude;
                         effBase = Mathf.Min(ChunkedLodBaseDistance, diag / 4f);   // base≥diag guard only
-                        effMult = 2.0f;                                          // SSE-correct for the 2× merge ladder
                     }
+                    effMult = Mathf.Max(1.05f, effMult);   // floor: mult ≤ 1 would never advance a level
                     m_lastEffectiveBase = effBase;
                     m_lastEffectiveMultiplier = effMult;
                     if (PoolMode)
