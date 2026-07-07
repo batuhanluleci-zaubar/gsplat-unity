@@ -105,6 +105,14 @@ namespace Gsplat
         [Range(0f, 10f)]
         public float MinContribution = 3f;
 
+        [Tooltip("Forward per-fragment alpha cutoff (PlayCanvas alphaClip). Fragments below this " +
+                 "alpha are discarded AND each splat's quad is shrunk to where its Gaussian falls " +
+                 "below it — a direct fill-rate lever. 0.00392 (=1/255) = default/lossless. Raise " +
+                 "toward 0.0625 (=1/16) for the XR (Aura) fill-rate preset: visibly thins wispy " +
+                 "low-opacity content but cuts overdraw. 0 falls back to 1/255.")]
+        [Range(0f, 0.25f)]
+        public float AlphaClipForward = 1f / 255f;
+
         public GsplatMaterial[] Materials;
         public Mesh Mesh { get; private set; }
 
@@ -158,6 +166,7 @@ namespace Gsplat
             ShowImportErrors = true;
             MinPixelSize = 2f;
             MinContribution = 3f;
+            AlphaClipForward = 1f / 255f;
 
             m_prevComputeShader = null;
             m_prevSplatInstanceSize = 0;

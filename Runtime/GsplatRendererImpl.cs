@@ -43,6 +43,7 @@ namespace Gsplat
         static readonly int k_lodFadeEnabled = Shader.PropertyToID("_LodFadeEnabled");
         static readonly int k_minPixelSize = Shader.PropertyToID("_GsplatMinPixelSize");
         static readonly int k_minContribution = Shader.PropertyToID("_GsplatMinContribution");
+        static readonly int k_alphaClip = Shader.PropertyToID("_GsplatAlphaClip");
         static readonly int k_poolLiveMask = Shader.PropertyToID("_PoolLiveMask");
 
         uint m_framesBeforeRecomputeSort = 0;
@@ -914,10 +915,11 @@ namespace Gsplat
             m_propertyBlock.SetFloat(k_scaleFactor, scaleFactor);
             m_propertyBlock.SetMatrix(k_matrixM, transform.localToWorldMatrix);
 
-            // Per-splat cull gates (PC minPixelSize/minContribution) as GLOBALS so the merged
-            // global draw (own material, no per-renderer block) picks them up too.
+            // Per-splat cull gates (PC minPixelSize/minContribution) + forward alpha clip as
+            // GLOBALS so the merged global draw (own material, no per-renderer block) picks them up.
             Shader.SetGlobalFloat(k_minPixelSize, GsplatSettings.Instance.MinPixelSize);
             Shader.SetGlobalFloat(k_minContribution, GsplatSettings.Instance.MinContribution);
+            Shader.SetGlobalFloat(k_alphaClip, GsplatSettings.Instance.AlphaClipForward);
 
             uint order = Math.Clamp(renderOrder, 0, GsplatSettings.Instance.MaxRenderOrder - 1);
             var rp = new RenderParams(m_gsplatAsset.Materials[order])

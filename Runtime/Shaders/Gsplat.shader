@@ -146,7 +146,7 @@ Shader "Gsplat/Standard"
                 float afade = 1.0 - pow(max(1e-6, 1.0 - i.color.a), i.fade);
                 float alpha = (exp(-A * 4.0) + falloff) * afade;
 
-                if (alpha < 1.0 / 255.0) discard;
+                if (alpha < (_GsplatAlphaClip > 0.0 ? _GsplatAlphaClip : (1.0 / 255.0))) discard;
                 if (_GammaToLinear)
                     return float4(GammaToLinearSpace(i.color.rgb) * alpha * _Brightness, alpha);
                 return float4(i.color.rgb * alpha * _Brightness, alpha);

@@ -107,7 +107,7 @@ Shader "Gsplat/Global"
                 float falloff = -exp((maxUV - p.scaleFactor * 1.16) * 25 * p.scaleFactor);
                 float alpha = (exp(-A * 4.0) + falloff) * i.color.a;
 
-                if (alpha < 1.0 / 255.0) discard;
+                if (alpha < (_GsplatAlphaClip > 0.0 ? _GsplatAlphaClip : (1.0 / 255.0))) discard;
                 if (p.gammaToLinear)
                     return float4(GammaToLinearSpace(i.color.rgb) * alpha * p.brightness, alpha);
                 return float4(i.color.rgb * alpha * p.brightness, alpha);

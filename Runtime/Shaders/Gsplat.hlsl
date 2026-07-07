@@ -45,6 +45,8 @@ const float4 discardVec = float4(0.0, 0.0, 2.0, 1.0);
 // see the same values; 0 disables a gate (an unset uniform therefore fails open).
 float _GsplatMinPixelSize;     // discard splats whose projected diameter is below this many pixels
 float _GsplatMinContribution;  // discard splats with opacity * 2pi * sqrt(det(cov2D)) below this
+float _GsplatAlphaClip;        // per-fragment alpha cutoff + quad-shrink threshold (default 1/255;
+                               // raise toward 1/16 for XR fill-rate). 0 falls back to 1/255.
 
 bool InitCenter(float4x4 modelView, float3 modelCenter, out SplatCenter center)
 {
@@ -189,7 +191,13 @@ bool InitCorner(SplatSource source, SplatCovariance covariance, SplatCenter cent
 
 void ClipCorner(inout SplatCorner corner, float alpha)
 {
-    float clip = min(1.0, sqrt(-log(1.0 / 255.0 / alpha)) / 2.0);
+    // Shrink the quad to where the Gaussian's contribution falls below the alpha cutoff, so we
+    // don't rasterize fragments that will be discarded anyway. Raising the cutoff (XR preset)
+    // shrinks the quad more = less overdraw. Guarded: when the splat's own opacity is already
+    // below the cutoff, -log(cutoff/alpha) <= 0 -> clip 0 -> the quad collapses (splat culled),
+    // and max(alpha, eps) keeps the divide finite (the old 1/255 form NaN'd for alpha < cutoff).
+    float cutoff = _GsplatAlphaClip > 0.0 ? _GsplatAlphaClip : (1.0 / 255.0);
+    float clip = min(1.0, sqrt(max(-log(cutoff / max(alpha, 1e-6)), 0.0)) * 0.5);
     corner.offset *= clip;
     corner.uv *= clip;
 }
