@@ -98,7 +98,7 @@ namespace Gsplat
                  "Lower (0.7–0.9) = tighter/fewer drawn if you can accept faint edge clipping; " +
                  "higher (1.1–1.5) = safer/more drawn if you see holes. Only affects chunk culling.")]
         [Range(0.3f, 2f)]
-        public float ChunkedCullFootprintScale = 1f;
+        public float ChunkedCullFootprintScale = 1.3f;
 
         [Tooltip("R4 streaming: keep only a budget of splats GPU-resident. Each refresh, the " +
                  "selected per-chunk LODs are compacted into a pool from the combined asset's " +
