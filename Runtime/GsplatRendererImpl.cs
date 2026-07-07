@@ -417,17 +417,19 @@ namespace Gsplat
                 {
                     Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
                     distRaw = Vector3.Distance(camLocal, closest) * scale;
-                    m_chunkDist[c] = distRaw;
                     d = distRaw * fovScale;
                     if (doBehind && distRaw > 1e-4f)
                     {
                         // t = how far behind the closest point is (0 = beside/ahead, 1 = dead
-                        // behind); cos of the angle to the view axis, local space. Only the LOD
-                        // band distance is penalized — m_chunkDist (balancer buckets, eviction)
-                        // stays pure distance, matching PC (their penalty scales optimalLod only).
+                        // behind); cos of the angle to the view axis, local space.
                         float t = -Vector3.Dot(fwdLocal, closest - camLocal) * scale / distRaw;
                         if (t > 0f) d *= 1f + t * (behindPenalty - 1f);
                     }
+                    // Balancer buckets are fed the penalized, FOV-scaled distance (PC parity:
+                    // their budgetBucket derives from the penalized fovAdjustedDistance), so a
+                    // behind chunk is also FIRST in line for budget degrade — otherwise a behind
+                    // chunk at 5m would outrank an on-screen chunk at 20m for budget.
+                    m_chunkDist[c] = d;
                 }
                 int req;
                 if (doDistance)

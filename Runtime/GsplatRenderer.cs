@@ -86,7 +86,7 @@ namespace Gsplat
         [Tooltip("LOD penalty for chunks BEHIND the camera: their band distance is inflated up to " +
                  "xN when fully behind (PlayCanvas lodBehindPenalty), so what you can't see coarsens " +
                  "first and frees budget for what you can. 1 = off (the PC engine default), but every " +
-                 "PlayCanvas streamed example ships 2-5. Selection re-evaluates on the rotation " +
+                 "PlayCanvas streamed example ships 2-4 (mostly 3). Selection re-evaluates on the rotation " +
                  "refresh gate, so turning around restores full quality after one refresh. Keep at 2 " +
                  "while pool refreshes re-upload the whole pool; raise toward 3 once refills are " +
                  "incremental.")]

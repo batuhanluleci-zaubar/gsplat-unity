@@ -145,9 +145,13 @@ bool InitCorner(SplatSource source, SplatCovariance covariance, SplatCenter cent
     float lambda2 = max(mid - radius, 0.1);
 
     // cull large-but-faint gaussians: opacity * 2pi * sqrt(det) is the splat's total screen
-    // contribution (lambda1*lambda2 = det of the dilated 2D covariance). The pixel-size gate
-    // below keeps these because they are BIG; only this gate removes them.
-    if (alpha * 6.2831853 * sqrt(lambda1 * lambda2) < _GsplatMinContribution)
+    // contribution. The pixel-size gate below keeps these because they are BIG; only this
+    // gate removes them. det uses the UNCLAMPED smaller eigenvalue (PC parity: their compute
+    // path gates on the raw dilated determinant and drops det<=0 outright); lambda2's 0.1
+    // clamp below only protects the quad-axis math.
+    float det2d = lambda1 * (mid - radius);
+    if (_GsplatMinContribution > 0.0 &&
+        (det2d <= 0.0 || alpha * 6.2831853 * sqrt(max(det2d, 0.0)) < _GsplatMinContribution))
     {
         return false;
     }
