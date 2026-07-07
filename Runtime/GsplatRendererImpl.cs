@@ -273,11 +273,11 @@ namespace Gsplat
         // InitOrderChunked over the combined buffer; reuses existing depth+sort+draw.
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
-            bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst)
+            bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst, float cullFootprintScale)
         {
             EnsureChunkSetup(table);
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, splatBudget > 0, hysteresis, hyst);
+                baseDistance, multiplier, cull, cullMargin, splatBudget > 0, hysteresis, hyst, cullFootprintScale);
             // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
             // LODs in a compact scene; the budget balancer is what forces the full ladder into
             // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
@@ -322,7 +322,7 @@ namespace Gsplat
         // still poke into view; the margin also adds hysteresis against edge flicker.
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            float cullMargin, bool budgetBands, bool hysteresis, float hyst)
+            float cullMargin, bool budgetBands, bool hysteresis, float hyst, float cullFootprintScale)
         {
             if (!budgetBands) m_budgetScale = 1f;   // corrector only lives while a budget is active
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
@@ -404,18 +404,31 @@ namespace Gsplat
                 {
                     var sp = table.Chunks[c].Sphere;
                     Vector3 wc = matrixWorld.MultiplyPoint3x4(new Vector3(sp.x, sp.y, sp.z));
-                    // LOD-aware footprint pad. The baked sphere covers only LOD0 (fine) splat
-                    // footprints, but this chunk is DRAWN at level `use`, whose merged splats have
-                    // far larger 3sigma footprints (a coarse splat is ~a cell wide). A chunk just
-                    // outside the frustum whose COARSE splats still reach on-screen must be kept,
-                    // else the wall/vault it covers shows holes (skybox through the gaps) — the bug
-                    // that a big uniform cullMargin was masking at the cost of drawing far
-                    // off-screen chunks too. Pad the cull radius by the chunk's own extent, scaled
-                    // by how coarse the selected level is (fine levels overhang little, the coarsest
-                    // ~a full cell). LOD-aware => keeps only the genuinely-visible edge band.
-                    float lodFrac = maxLod > 0 ? (float)use / maxLod : 0f;
-                    float footPad = table.Chunks[c].MaxExtent * scale * (0.25f + 1.25f * lodFrac);
-                    float wr = sp.w * scale + cullMargin + footPad;
+                    // Cull radius. Prefer the EXACT per-level footprint radius baked by
+                    // tools/bake_chunks.py (`FootR` = p99.9 of dist-to-sphere-centre + 2sigma, i.e.
+                    // the visible 2sigma core of that level's splats, needles dropped). It is tight
+                    // AND LOD-correct: a chunk whose selected-level splats don't reach the frustum
+                    // is culled (no wasted tris drawing off-screen background — the reported bug),
+                    // while a coarse chunk whose big splats DO reach is kept (no holes). The
+                    // per-level value is measured from the SAME sphere centre used here. `scale`
+                    // maps it to world; `cullFootprintScale` (inspector) trades completeness vs
+                    // tris (1 = exact 2sigma; <1 = tighter/fewer, >1 = safer/more).
+                    //
+                    // Fallback for sidecars baked before FootR: the old LOD0 sphere widened by a
+                    // heuristic extent pad — coarser at higher levels — which over-keeps but never
+                    // holes.
+                    var lodI = table.Chunks[c].Lods[use];
+                    float wr;
+                    if (lodI.FootR > 0f)
+                    {
+                        wr = lodI.FootR * scale * cullFootprintScale + cullMargin;
+                    }
+                    else
+                    {
+                        float lodFrac = maxLod > 0 ? (float)use / maxLod : 0f;
+                        float footPad = table.Chunks[c].MaxExtent * scale * (0.25f + 1.25f * lodFrac);
+                        wr = sp.w * scale + cullMargin + footPad;
+                    }
                     float minSlack = float.MaxValue;        // >=0 => sphere intersects the frustum
                     for (int p = 0; p < 6; p++)
                         minSlack = Mathf.Min(minSlack, m_worldFrustumPlanes[p].GetDistanceToPoint(wc) + wr);
@@ -535,7 +548,7 @@ namespace Gsplat
         // order). GPU holds ~budget splats instead of the whole combined buffer.
         public void DispatchChunkedPool(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            bool budgetBalance, float cullMargin, bool hysteresis, float hyst)
+            bool budgetBalance, float cullMargin, bool hysteresis, float hyst, float cullFootprintScale)
         {
             // Re-fill (256 chunks x 4 SetData) only when the camera moved past the refresh
             // thresholds — the visible set is otherwise unchanged. Uses the same reliable
@@ -546,7 +559,7 @@ namespace Gsplat
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, budgetBalance, hysteresis, hyst);
+                baseDistance, multiplier, cull, cullMargin, budgetBalance, hysteresis, hyst, cullFootprintScale);
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)

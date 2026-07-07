@@ -93,6 +93,13 @@ namespace Gsplat
         [Tooltip("Cull chunks whose bounding sphere is outside the cull camera frustum.")]
         public bool ChunkedCull = true;
 
+        [Tooltip("Scales the per-chunk cull radius (the baked exact per-level footprint). " +
+                 "1 = exact visible 2σ core (tight, culls off-screen background to save tris). " +
+                 "Lower (0.7–0.9) = tighter/fewer drawn if you can accept faint edge clipping; " +
+                 "higher (1.1–1.5) = safer/more drawn if you see holes. Only affects chunk culling.")]
+        [Range(0.3f, 2f)]
+        public float ChunkedCullFootprintScale = 1f;
+
         [Tooltip("R4 streaming: keep only a budget of splats GPU-resident. Each refresh, the " +
                  "selected per-chunk LODs are compacted into a pool from the combined asset's " +
                  "CPU RAM — GPU holds ~budget instead of the whole 2x-LOD combined buffer.")]
@@ -374,12 +381,12 @@ namespace Gsplat
                             runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             effBase, effMult, ChunkedCull,
                             ChunkedBudgetBalancer, FrustumCullMargin,
-                            ChunkedLodHysteresis, ChunkedHysteresis);
+                            ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             effBase, effMult, ChunkedCull, FrustumCullMargin,
-                            ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis);
+                            ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale);
                 }
                 else
                 {

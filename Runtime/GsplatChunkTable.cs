@@ -18,7 +18,9 @@ namespace Gsplat
     public class GsplatChunkTable
     {
         // ---- JSON DTOs (Unity JsonUtility) ----
-        [Serializable] class LodJson { public int level; public int offset; public int count; }
+        // footR = exact per-level footprint radius (visible 2sigma core, p99.9, from the
+        // baker) — the tight, LOD-correct cull radius. 0 when the sidecar predates it.
+        [Serializable] class LodJson { public int level; public int offset; public int count; public float footR; }
         [Serializable] class ChunkJson { public float[] aabb; public float[] sphere; public float maxExtent; public LodJson[] lods; }
         [Serializable] class LevelJson { public int level; public int splatCount; }
         [Serializable] class ManifestJson
@@ -33,7 +35,7 @@ namespace Gsplat
             public int combinedSplatCount;
         }
 
-        public struct LodInterval { public int Level; public int Offset; public int Count; }
+        public struct LodInterval { public int Level; public int Offset; public int Count; public float FootR; }
 
         public struct Chunk
         {
@@ -71,7 +73,7 @@ namespace Gsplat
                 if (cj.lods != null)
                     foreach (var lj in cj.lods)
                         if (lj.level >= 0 && lj.level <= m.maxLod)
-                            lods[lj.level] = new LodInterval { Level = lj.level, Offset = lj.offset, Count = lj.count };
+                            lods[lj.level] = new LodInterval { Level = lj.level, Offset = lj.offset, Count = lj.count, FootR = lj.footR };
                 t.Chunks[i] = new Chunk
                 {
                     Aabb = MinMaxBounds(new[] { cj.aabb[0], cj.aabb[1], cj.aabb[2] },
