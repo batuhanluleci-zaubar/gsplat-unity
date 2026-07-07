@@ -39,6 +39,8 @@ namespace Gsplat
         static readonly int k_packedSplatsBuffer = Shader.PropertyToID("_PackedSplatsBuffer");
         static readonly int k_splatChunkBuffer = Shader.PropertyToID("_SplatChunk");
         static readonly int k_selectedLevelBuffer = Shader.PropertyToID("_SelectedLevel");
+        static readonly int k_fadeWeightBuffer = Shader.PropertyToID("_FadeWeight");
+        static readonly int k_lodFadeEnabled = Shader.PropertyToID("_LodFadeEnabled");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -67,6 +69,8 @@ namespace Gsplat
         GraphicsBuffer m_splatChunkBuffer;      // per-splat (chunkId<<4)|level tags
         GraphicsBuffer m_selectedLevelBuffer;   // per-chunk chosen level (updated each frame)
         uint[] m_selectedLevel;
+        GraphicsBuffer m_fadeWeightBuffer;      // per-chunk LOD cross-fade weight 0..255 (0 = no fade)
+        uint[] m_fadeWeight;
         readonly Plane[] m_worldFrustumPlanes = new Plane[6];
 
         // R3 budget-balancer scratch (see ApplyBudgetBalancer). Per-chunk camera distance +
@@ -258,11 +262,15 @@ namespace Gsplat
             m_chunkTable = table;
             m_splatChunkBuffer?.Dispose();
             m_selectedLevelBuffer?.Dispose();
+            m_fadeWeightBuffer?.Dispose();
             var tags = table.BuildSplatChunkTags();
             m_splatChunkBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, tags.Length, sizeof(uint));
             m_splatChunkBuffer.SetData(tags);
             m_selectedLevel = new uint[table.ChunkCount];
             m_selectedLevelBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
+                Mathf.Max(1, table.ChunkCount), sizeof(uint));
+            m_fadeWeight = new uint[table.ChunkCount];
+            m_fadeWeightBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
                 Mathf.Max(1, table.ChunkCount), sizeof(uint));
         }
 
@@ -274,11 +282,22 @@ namespace Gsplat
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst, float cullFootprintScale,
-            bool perSplatCull)
+            bool perSplatCull, bool fade, float fadeWidth)
         {
             EnsureChunkSetup(table);
+            // The draw shader now reads the per-chunk tag + selected level + fade weight to modulate
+            // opacity for the LOD cross-fade; bind them on the draw property block (buffers exist
+            // after EnsureChunkSetup, and the block is created before the first dispatch).
+            if (m_propertyBlock != null)
+            {
+                m_propertyBlock.SetBuffer(k_splatChunkBuffer, m_splatChunkBuffer);
+                m_propertyBlock.SetBuffer(k_selectedLevelBuffer, m_selectedLevelBuffer);
+                m_propertyBlock.SetBuffer(k_fadeWeightBuffer, m_fadeWeightBuffer);
+                m_propertyBlock.SetFloat(k_lodFadeEnabled, fade ? 1f : 0f);
+            }
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, splatBudget > 0, hysteresis, hyst, cullFootprintScale);
+                baseDistance, multiplier, cull, cullMargin, splatBudget > 0, hysteresis, hyst, cullFootprintScale,
+                fade, fadeWidth);
             // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
             // LODs in a compact scene; the budget balancer is what forces the full ladder into
             // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
@@ -286,6 +305,7 @@ namespace Gsplat
             m_lastBalancedTotal = (splatBudget > 0 && camera != null)
                 ? ApplyBudgetBalancer(table, splatBudget) : 0;
             m_selectedLevelBuffer.SetData(m_selectedLevel);
+            m_fadeWeightBuffer.SetData(m_fadeWeight);
 
             SorterResource.Initialized = true;
             m_prevCulled = true;
@@ -298,6 +318,7 @@ namespace Gsplat
             cs.SetBuffer(kernel, k_packedSplatsBuffer, res.PackedSplatsBuffer);
             cs.SetBuffer(kernel, k_splatChunkBuffer, m_splatChunkBuffer);
             cs.SetBuffer(kernel, k_selectedLevelBuffer, m_selectedLevelBuffer);
+            cs.SetBuffer(kernel, k_fadeWeightBuffer, m_fadeWeightBuffer);
 
             // Two-tier frustum cull for the user's exact spec — "cull everything the camera
             // can't see, cull nothing it can see." Tier 1 (per-CHUNK, ComputeSelectedLevels)
@@ -331,7 +352,8 @@ namespace Gsplat
         // still poke into view; the margin also adds hysteresis against edge flicker.
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, bool cull,
-            float cullMargin, bool budgetBands, bool hysteresis, float hyst, float cullFootprintScale)
+            float cullMargin, bool budgetBands, bool hysteresis, float hyst, float cullFootprintScale,
+            bool fade, float fadeWidth)
         {
             if (!budgetBands) m_budgetScale = 1f;   // corrector only lives while a budget is active
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
@@ -407,7 +429,23 @@ namespace Gsplat
 
                 int use = req;
                 while (use <= maxLod && table.Chunks[c].Lods[use].Count == 0) use++;
-                if (use > maxLod) { m_selectedLevel[c] = 0xFFFFFFFFu; continue; }
+                if (use > maxLod) { m_selectedLevel[c] = 0xFFFFFFFFu; m_fadeWeight[c] = 0u; continue; }
+
+                // LOD cross-fade weight (anti-pop): as the FOV-comp distance approaches the UPPER
+                // edge of `use`'s band, ramp w 0->1 so the next coarser level (use+1) is blended in
+                // over the last `fadeWidth` of the band and the discrete swap doesn't pop. Only when
+                // use+1 is a real (non-empty) level, else fading `use` down would just dim it.
+                m_fadeWeight[c] = 0u;
+                if (fade && doDistance && fadeWidth > 1e-4f
+                    && use < maxLod && table.Chunks[c].Lods[use + 1].Count > 0)
+                {
+                    float bandLo = use == 0 ? 0f : baseDistance * Mathf.Pow(multiplier, use - 1);
+                    float bandHi = baseDistance * Mathf.Pow(multiplier, use);
+                    float frac = Mathf.Clamp01((d - bandLo) / Mathf.Max(1e-6f, bandHi - bandLo));
+                    float fz = Mathf.Clamp01(fadeWidth);
+                    if (frac > 1f - fz)
+                        m_fadeWeight[c] = (uint)Mathf.Clamp(Mathf.RoundToInt((frac - (1f - fz)) / fz * 255f), 0, 255);
+                }
 
                 if (doCull)
                 {
@@ -456,6 +494,7 @@ namespace Gsplat
                         // else: keep the plain-test result (re-enter as soon as truly visible)
                     }
                     m_selectedLevel[c] = inside ? (uint)use : 0xFFFFFFFFu;
+                    if (!inside) m_fadeWeight[c] = 0u;   // culled: no fade
                 }
                 else m_selectedLevel[c] = (uint)use;
             }
@@ -515,6 +554,13 @@ namespace Gsplat
             {
                 int c = m_bucketOrder[i];
                 total += table.Chunks[c].Lods[(int)m_selectedLevel[c]].Count;
+                // a cross-fading chunk also draws its next coarser level (use+1) — count both so
+                // the fade stays inside the budget ceiling instead of silently blowing it.
+                if (m_fadeWeight[c] != 0u)
+                {
+                    int nl1 = (int)m_selectedLevel[c] + 1;
+                    if (nl1 <= table.MaxLod) total += table.Chunks[c].Lods[nl1].Count;
+                }
             }
 
             // Over budget: degrade STRICTLY far-first. Walk from the farthest active chunk toward
@@ -530,6 +576,15 @@ namespace Gsplat
             for (int i = active - 1; i >= 0 && total > budget; i--)
             {
                 int c = m_bucketOrder[i];
+                // Budget-pressured chunk: stop cross-fading it (the N/N+1 pair is stale once we
+                // coarsen) and reclaim its N+1 cost. Only the farthest, least-visible chunks reach
+                // here, so accepting a pop on them matches the balancer's far-first rationale.
+                if (m_fadeWeight[c] != 0u)
+                {
+                    int nl1 = (int)m_selectedLevel[c] + 1;
+                    if (nl1 <= table.MaxLod) total -= table.Chunks[c].Lods[nl1].Count;
+                    m_fadeWeight[c] = 0u;
+                }
                 int L = (int)m_selectedLevel[c];
                 while (total > budget)
                 {
@@ -560,7 +615,8 @@ namespace Gsplat
                 return;
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
-                baseDistance, multiplier, cull, cullMargin, budgetBalance, hysteresis, hyst, cullFootprintScale);
+                baseDistance, multiplier, cull, cullMargin, budgetBalance, hysteresis, hyst, cullFootprintScale,
+                false, 0f);   // no LOD cross-fade in the streaming pool path (compacts whole chunks)
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)
@@ -631,6 +687,7 @@ namespace Gsplat
         {
             m_propertyBlock ??= new MaterialPropertyBlock();
             m_propertyBlock.SetBuffer(k_orderBuffer, OrderBuffer);
+            m_propertyBlock.SetFloat(k_lodFadeEnabled, 0f);   // off until the chunked path enables it
         }
 
         public void Dispose()
@@ -650,6 +707,8 @@ namespace Gsplat
             m_splatChunkBuffer = null;
             m_selectedLevelBuffer?.Dispose();
             m_selectedLevelBuffer = null;
+            m_fadeWeightBuffer?.Dispose();
+            m_fadeWeightBuffer = null;
             m_chunkTable = null;
         }
 

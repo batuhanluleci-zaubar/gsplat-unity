@@ -136,6 +136,18 @@ namespace Gsplat
         [Range(0f, 0.5f)]
         public float ChunkedHysteresis = 0.15f;
 
+        [Tooltip("Anti-pop LOD cross-fade: near a LOD-band boundary, draw BOTH the chunk's level and " +
+                 "the next coarser level, ramping their opacity so the discrete swap doesn't POP " +
+                 "during camera motion (LODGE opacity-blending analogue). Combined path only; costs a " +
+                 "second (coarser, cheaper) level only for chunks inside the fade zone. Off = today's " +
+                 "hard swap.")]
+        public bool ChunkedLodFade = false;
+
+        [Tooltip("Cross-fade zone width as a fraction of each LOD band (0.25 = fade over the last 25% " +
+                 "of the band before the swap). Only used when Chunked Lod Fade is on.")]
+        [Range(0f, 0.5f)]
+        public float ChunkedFadeWidth = 0.25f;
+
         [Tooltip("Combined-path drawn-splat budget (PlayCanvas splatBudget). The distance bands " +
                  "alone only reach a few LODs in a compact scene; this degrades the farthest " +
                  "chunks toward the coarsest LOD until the drawn total fits, so the FULL LOD " +
@@ -399,7 +411,10 @@ namespace Gsplat
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                             effBase, effMult, ChunkedCull, FrustumCullMargin,
                             ChunkedSplatBudget, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
-                            ChunkedPerSplatCull);
+                            ChunkedPerSplatCull,
+                            // Fade uses the per-renderer draw shader; the global merged-draw path lacks the
+                            // per-splat tag/fade buffers, so auto-disable fade there (would double-darken).
+                            ChunkedLodFade && !GsplatSorter.Instance.GlobalRenderEnabled, ChunkedFadeWidth);
                 }
                 else
                 {

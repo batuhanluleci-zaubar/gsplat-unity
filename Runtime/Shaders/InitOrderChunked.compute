@@ -20,6 +20,7 @@ AppendStructuredBuffer<uint> _OrderBuffer;
 StructuredBuffer<uint4> _PackedSplatsBuffer;
 StructuredBuffer<uint>  _SplatChunk;       // per-splat: (chunkId << 4) | level (level 0..15)
 StructuredBuffer<uint>  _SelectedLevel;    // per-chunk chosen level; 0xFFFFFFFF = chunk culled
+StructuredBuffer<uint>  _FadeWeight;       // per-chunk LOD cross-fade weight 0..255 (0 = no fade)
 
 #ifdef FRUSTUM_CULL
 float4 _FrustumPlanes[6];                  // object-space, inward normals, normalized
@@ -67,9 +68,11 @@ void InitOrderChunked(uint3 id : SV_DispatchThreadID)
     uint chunkId = packed >> 4u;
     uint level = packed & 0xFu;
 
-    // Draw only the level currently selected for this chunk (mismatch also covers
-    // culled chunks, whose selected level is 0xFFFFFFFF).
-    if (_SelectedLevel[chunkId] != level)
+    // Draw the level selected for this chunk. When the chunk is cross-fading (fade weight != 0),
+    // ALSO draw its next coarser level (selected+1); the draw shader ramps the two levels' opacity
+    // so the LOD swap doesn't pop. Culled chunks have selected 0xFFFFFFFF and fade 0 → match nothing.
+    uint sel = _SelectedLevel[chunkId];
+    if (level != sel && !(_FadeWeight[chunkId] != 0u && sel != 0xFFFFFFFFu && level == sel + 1u))
         return;
 
 #ifdef FRUSTUM_CULL

@@ -44,6 +44,13 @@ Shader "Gsplat/Standard"
             float _ScaleFactor;
             StructuredBuffer<uint> _OrderBuffer;
 
+            // Chunked-LOD cross-fade (anti-pop). Only read when _LodFadeEnabled>0.5 (chunked path
+            // with fade on) so non-chunked/pool draws never touch these unbound buffers.
+            float _LodFadeEnabled;
+            StructuredBuffer<uint> _SplatChunk;      // (chunkId<<4)|level per splat
+            StructuredBuffer<uint> _SelectedLevel;   // per-chunk selected (finer) level
+            StructuredBuffer<uint> _FadeWeight;      // per-chunk fade weight 0..255
+
             struct appdata
             {
                 float4 vertex : POSITION;
@@ -74,6 +81,7 @@ Shader "Gsplat/Standard"
                 float2 uv : TEXCOORD0;
                 float4 vertex : SV_POSITION;
                 float4 color: COLOR;
+                float fade : TEXCOORD1;   // LOD cross-fade opacity exponent (1 = no fade)
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -84,10 +92,23 @@ Shader "Gsplat/Standard"
                 UNITY_INITIALIZE_OUTPUT(v2f, o);
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
                 o.vertex = discardVec;
+                o.fade = 1.0;
 
                 SplatSource source;
                 if (!InitSource(v, source))
                     return o;
+
+                // LOD cross-fade: this splat's level N gets exponent (1-w), the coarser level N+1
+                // gets w, so summed transmittance = (1-a_N)^(1-w)*(1-a_{N+1})^w interpolates the two
+                // levels' occlusion with no double-counting. w=0 => exponent 1 => opacity unchanged.
+                if (_LodFadeEnabled > 0.5)
+                {
+                    uint tag = _SplatChunk[source.id];
+                    uint cid = tag >> 4u;
+                    uint lvl = tag & 0xFu;
+                    float w = _FadeWeight[cid] * (1.0 / 255.0);
+                    o.fade = (lvl == _SelectedLevel[cid]) ? (1.0 - w) : w;
+                }
 
                 SplatCenter center;
                 SplatCorner corner;
@@ -120,7 +141,10 @@ Shader "Gsplat/Standard"
                 float maxUV = max(absUV.x, absUV.y);
 
                 float falloff = -exp((maxUV - _ScaleFactor * 1.16) * 25 * _ScaleFactor);
-                float alpha = (exp(-A * 4.0) + falloff) * i.color.a;
+                // Cross-fade modulates OPACITY only (afade), leaving the Gaussian coverage term
+                // (exp(-A*4)+falloff) intact so the fading splat keeps full footprint to overlap.
+                float afade = 1.0 - pow(max(1e-6, 1.0 - i.color.a), i.fade);
+                float alpha = (exp(-A * 4.0) + falloff) * afade;
 
                 if (alpha < 1.0 / 255.0) discard;
                 if (_GammaToLinear)
