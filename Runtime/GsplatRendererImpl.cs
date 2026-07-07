@@ -128,14 +128,14 @@ namespace Gsplat
             CreatePropertyBlock();
         }
 
-        public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv) =>
+        public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv, bool radial) =>
             // Depth is only consumed for the first RemainingCount order entries (the sort
             // Count); bounding the dispatch to it also keeps the incremental pool path off
             // undefined order entries in [LiveCount, UsedEnd) — an out-of-bounds-INDEX
             // structured read that is benign on desktop but relies on robustBufferAccess
             // on mobile (Adreno).
             m_gsplatAsset.ComputeDepth(cmd, matrixMv, SorterResource, GsplatResource,
-                System.Math.Min(m_remainingCount, GsplatResource.UploadedCount));
+                System.Math.Min(m_remainingCount, GsplatResource.UploadedCount), radial);
 
         public int PoolRepackCount => m_poolLayout?.RepackCount ?? 0;
 

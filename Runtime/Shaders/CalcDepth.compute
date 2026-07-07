@@ -7,6 +7,7 @@
 
 uint _SplatCount;
 float4x4 _MatrixMV;
+int _RadialDepth;                 // 0 = view-space Z (directional), 1 = radial distance
 StructuredBuffer<float3> _PositionBuffer;
 StructuredBuffer<uint> _OrderBuffer;
 RWStructuredBuffer<float> _DepthBuffer;
@@ -20,5 +21,6 @@ void CalcDepth(uint3 id : SV_DispatchThreadID)
 
     float3 pos = _PositionBuffer[_OrderBuffer[idx]];
     pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
-    _DepthBuffer[idx] = pos.z;
+    // See CalcDepthSpark for the radial-vs-directional rationale (camera = view-space origin).
+    _DepthBuffer[idx] = _RadialDepth != 0 ? -length(pos) : pos.z;
 }

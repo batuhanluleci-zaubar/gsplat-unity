@@ -254,7 +254,19 @@ namespace Gsplat
         [HideInInspector] public uint SortRefreshRate = 1;
         [HideInInspector] public uint CutoutsRefreshRate = 1;
 
-        public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv) => m_renderer.ComputeDepth(cmd, matrixMv);
+        [Tooltip("Sort by RADIAL distance to the camera instead of view-space depth (PlayCanvas " +
+                 "radialSorting). A radial order is rotation-INVARIANT: turning the head in place " +
+                 "does not change the back-to-front order. Default off = view-space depth (PC " +
+                 "desktop default). Renders equivalently to depth sorting (slightly less painter-" +
+                 "exact for strongly anisotropic scenes; PC ships it for all streamed walkthroughs). " +
+                 "NOTE: this currently only swaps the sort KEY — the fps win of SKIPPING the re-sort " +
+                 "on rotation is NOT yet wired, because our combined-chunked path rebuilds the drawn " +
+                 "set every frame (per-splat frustum cull), so a skipped sort would draw the new set " +
+                 "unsorted. The skip needs a stable resident set across rotation (GPU-cull-at-draw / " +
+                 "look-back residency) — future work; radial keys are the prerequisite, now in place.")]
+        public bool RadialSort = false;
+
+        public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv) => m_renderer.ComputeDepth(cmd, matrixMv, RadialSort);
 
         void OnEnable()
         {

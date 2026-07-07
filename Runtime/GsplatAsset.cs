@@ -140,6 +140,7 @@ namespace Gsplat
         static readonly protected int k_boundsBuffer = Shader.PropertyToID("_BoundsBuffer");
         static readonly protected int k_cutoutsBuffer = Shader.PropertyToID("_CutoutsBuffer");
         static readonly protected int k_cutoutsCount = Shader.PropertyToID("_CutoutsCount");
+        static readonly protected int k_radialDepth = Shader.PropertyToID("_RadialDepth");
 
         public GsplatMaterial GsplatMaterial => GsplatSettings.Instance.Materials[(int)Compression];
         public Material[] Materials => GsplatMaterial.Materials[SHBands];
@@ -203,8 +204,9 @@ namespace Gsplat
 
         // `count` = how many leading order entries need depth keys (the sort Count, i.e. the
         // renderer's RemainingCount); entries beyond it are never consumed by the radix sort.
+        // `radial` = use rotation-invariant radial distance keys instead of view-space Z.
         public abstract void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv,
-            ISorterResource sorterResource, GsplatResource resource, uint count);
+            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial);
 
         public abstract void InitOrder(ISorterResource sorterResource, GsplatResource resource,
             bool updateBounds);

@@ -7,6 +7,7 @@
 
 uint _SplatCount;
 float4x4 _MatrixMV;
+int _RadialDepth;                 // 0 = view-space Z (directional), 1 = radial distance
 StructuredBuffer<uint4> _PackedSplatsBuffer;
 StructuredBuffer<uint> _OrderBuffer;
 RWStructuredBuffer<float> _DepthBuffer;
@@ -21,5 +22,10 @@ void CalcDepthSpark(uint3 id : SV_DispatchThreadID)
     uint4 word = _PackedSplatsBuffer[_OrderBuffer[idx]];
     float3 pos = float3(f16tof32(word.y & 0xffffu), f16tof32((word.y >> 16u) & 0xffffu), f16tof32(word.z & 0xffffu));
     pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
-    _DepthBuffer[idx] = pos.z;
+    // Directional key = view Z (camera looks -Z, so farther = more negative = sorts first,
+    // back-to-front). Radial key = -distance to camera; in VIEW space the camera is the
+    // origin so |pos| IS that distance. Radial order is rotation-invariant (only translation
+    // changes it) — lets the sort be skipped during XR head rotation. Both keys are negative
+    // for in-front splats, so the existing float radix (which handles view-Z) sorts both.
+    _DepthBuffer[idx] = _RadialDepth != 0 ? -length(pos) : pos.z;
 }
