@@ -99,12 +99,15 @@ namespace Gsplat
                  "frustum (no holes). Costs one per-splat frustum test in the InitOrder pass.")]
         public bool ChunkedPerSplatCull = true;
 
-        [Tooltip("Scales the per-chunk cull radius (the baked exact per-level footprint). " +
-                 "1 = exact visible 2σ core (tight, culls off-screen background to save tris). " +
-                 "Lower (0.7–0.9) = tighter/fewer drawn if you can accept faint edge clipping; " +
-                 "higher (1.1–1.5) = safer/more drawn if you see holes. Only affects chunk culling.")]
-        [Range(0.3f, 2f)]
-        public float ChunkedCullFootprintScale = 1.3f;
+        [Tooltip("Scales the per-CHUNK cull radius (the baked exact per-level footprint). Because " +
+                 "Gaussian splats are semi-transparent, the tails of OFF-screen splats still add " +
+                 "opacity to visible pixels — culling a whole chunk that overhangs the view thins " +
+                 "the wall it feeds and lets the skybox bleed through (transparency holes). So the " +
+                 "per-chunk cull must be CONSERVATIVE (2 = keep chunks up to ~2x their footprint " +
+                 "from the frustum) and let the per-SPLAT cull do the precise trimming. Lower only " +
+                 "if you see too many tris AND no holes; raise if walls go see-through.")]
+        [Range(0.3f, 4f)]
+        public float ChunkedCullFootprintScale = 2.0f;
 
         [Tooltip("R4 streaming: keep only a budget of splats GPU-resident. Each refresh, the " +
                  "selected per-chunk LODs are compacted into a pool from the combined asset's " +
