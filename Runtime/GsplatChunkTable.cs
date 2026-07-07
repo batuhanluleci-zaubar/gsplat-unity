@@ -20,7 +20,10 @@ namespace Gsplat
         // ---- JSON DTOs (Unity JsonUtility) ----
         // footR = exact per-level footprint radius (visible 2sigma core, p99.9, from the
         // baker) — the tight, LOD-correct cull radius. 0 when the sidecar predates it.
-        [Serializable] class LodJson { public int level; public int offset; public int count; public float footR; }
+        // `file` (streaming manifest only) = index into ManifestJson.filenames of the per-(chunk,level)
+        // .spz blob; `offset` is a splat index into the combined buffer (combined manifest) OR 0 (each
+        // streaming blob is a whole standalone .spz).
+        [Serializable] class LodJson { public int level; public int offset; public int count; public float footR; public int file; }
         [Serializable] class ChunkJson { public float[] aabb; public float[] sphere; public float maxExtent; public LodJson[] lods; }
         [Serializable] class LevelJson { public int level; public int splatCount; }
         [Serializable] class ManifestJson
@@ -33,9 +36,16 @@ namespace Gsplat
             public LevelJson[] levels;
             public ChunkJson[] chunks;
             public int combinedSplatCount;
+            public string[] filenames;   // streaming (.gsstream/.gsc) only: per-(chunk,level) blob paths
         }
 
-        public struct LodInterval { public int Level; public int Offset; public int Count; public float FootR; }
+        // Offset = combined-buffer splat index (combined mode); StreamPath = per-blob .spz path
+        // (streaming mode, null in combined mode). Exactly one is meaningful per LodInterval.
+        public struct LodInterval { public int Level; public int Offset; public int Count; public float FootR; public string StreamPath; }
+
+        // True when this table drives the streaming pool (per-blob disk loads) vs the combined buffer.
+        public bool IsStreaming { get; private set; }
+        public byte SHBands { get; private set; }
 
         public struct Chunk
         {
@@ -111,6 +121,60 @@ namespace Gsplat
                 }
             }
             return tags;
+        }
+
+        // Parse a STREAMING manifest (.gsstream/.gsc format): per-lod entries carry a `file` index
+        // into `filenames`, resolved against `streamDir` to a full blob path. Splats are NOT in one
+        // combined buffer — each (chunk,level) is a standalone .spz loaded on demand. Otherwise the
+        // chunk geometry (aabb/sphere/footR/count) is identical to the combined table.
+        public static GsplatChunkTable ParseStreaming(string json, string streamDir)
+        {
+            var m = JsonUtility.FromJson<ManifestJson>(json);
+            if (m == null || m.chunks == null)
+                throw new ArgumentException("Invalid streaming chunk table JSON");
+            if (m.maxLod > 15)
+                throw new ArgumentException($"Streaming chunk table maxLod={m.maxLod} exceeds the 4-bit LOD-tag limit (15).");
+            if (m.filenames == null || m.filenames.Length == 0)
+                throw new ArgumentException("Streaming chunk table has no `filenames` — not a streaming manifest.");
+
+            var t = new GsplatChunkTable
+            {
+                ChunkCount = m.chunks.Length,
+                MaxLod = m.maxLod,
+                CombinedSplatCount = m.combinedSplatCount,
+                IsStreaming = true,
+                SHBands = (byte)m.shBands,
+            };
+            t.Bounds = MinMaxBounds(m.boundsMin, m.boundsMax);
+            t.Chunks = new Chunk[m.chunks.Length];
+            for (int i = 0; i < m.chunks.Length; i++)
+            {
+                var cj = m.chunks[i];
+                var lods = new LodInterval[m.maxLod + 1];
+                for (int L = 0; L <= m.maxLod; L++) lods[L] = new LodInterval { Level = L, Count = 0 };
+                if (cj.lods != null)
+                    foreach (var lj in cj.lods)
+                        if (lj.level >= 0 && lj.level <= m.maxLod)
+                        {
+                            if (lj.file < 0 || lj.file >= m.filenames.Length)
+                                throw new ArgumentException(
+                                    $"Streaming chunk {i} lod {lj.level}: file index {lj.file} out of range [0,{m.filenames.Length}).");
+                            lods[lj.level] = new LodInterval
+                            {
+                                Level = lj.level, Count = lj.count, FootR = lj.footR,
+                                StreamPath = System.IO.Path.Combine(streamDir, m.filenames[lj.file]),
+                            };
+                        }
+                t.Chunks[i] = new Chunk
+                {
+                    Aabb = MinMaxBounds(new[] { cj.aabb[0], cj.aabb[1], cj.aabb[2] },
+                                        new[] { cj.aabb[3], cj.aabb[4], cj.aabb[5] }),
+                    Sphere = new Vector4(cj.sphere[0], cj.sphere[1], cj.sphere[2], cj.sphere[3]),
+                    MaxExtent = cj.maxExtent,
+                    Lods = lods,
+                };
+            }
+            return t;
         }
 
         static Bounds MinMaxBounds(float[] mn, float[] mx)
