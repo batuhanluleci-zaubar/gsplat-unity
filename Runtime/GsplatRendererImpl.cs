@@ -354,14 +354,14 @@ namespace Gsplat
                 float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
                 float tanHalfH = tanHalfV * camera.aspect;
                 fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
-                if (budgetBands)
-                {
-                    // Stage-A: over-budget demand shrinks the bands (m_budgetScale < 1) so far
-                    // chunks coarsen geometrically; the hysteresis band check below uses the
-                    // same effective values. (PlayCanvas evaluateOptimalLods parity.)
-                    baseDistance *= m_budgetScale;
-                    multiplier = Mathf.Max(1.2f, multiplier * Mathf.Pow(m_budgetScale, -0.2f));
-                }
+                // NOTE: the LOD bands are PURE distance — deliberately NOT scaled by a global
+                // budget-demand factor. An earlier Stage-A `m_budgetScale` shrank the bands when
+                // the view was over budget, which coarsened EVERY chunk (near ones included) and,
+                // worse, coupled a chunk's LOD to how many OTHER chunks were on screen: moving away
+                // from a chunk reduced the total demand, relaxed the scale, and made that chunk
+                // FINER even as it got farther ("quality rises with distance"). Budget pressure is
+                // now absorbed entirely by the strictly far-first degrade in ApplyBudgetBalancer,
+                // so a chunk's LOD depends only on its own distance — monotonic and view-stable.
                 invLogMult = 1f / Mathf.Log(Mathf.Max(1.0001f, multiplier));
                 baseDistance = Mathf.Max(1e-4f, baseDistance);
             }
@@ -508,35 +508,27 @@ namespace Gsplat
                 total += table.Chunks[c].Lods[(int)m_selectedLevel[c]].Count;
             }
 
-            // Stage-A update for NEXT frame (PlayCanvas _enforceBudget: dead-zone 0.4, blend 0.3,
-            // 1/√ratio): this frame's demand steers the band scale so future selections land
-            // near the budget on their own and the degrade sweep below only trims a small
-            // residual — instead of robbing the nearest chunks of their fine LODs every frame.
-            float ratio = (float)total / budget;
-            if (ratio > 1.4f || ratio < 0.6f)
+            // Over budget: degrade STRICTLY far-first. Walk from the farthest active chunk toward
+            // the nearest and coarsen EACH chunk as far as it needs to go (to its coarsest present
+            // level if necessary) before moving to the next nearer chunk. A near chunk is only
+            // touched once every farther chunk is already at its coarsest — so a chunk's LOD never
+            // depends on how many other chunks share the view, and the nearest chunks keep their
+            // fine distance-LOD until the budget is smaller than the whole far field fully
+            // coarsened. This replaces the old one-level-per-pass sweep (which degraded near
+            // chunks before the far field was exhausted) and the global band-scale corrector —
+            // together they made LOD non-monotonic with distance under budget pressure.
+            // Under budget: nothing runs; the pure-distance selection stands (ceiling, not target).
+            for (int i = active - 1; i >= 0 && total > budget; i--)
             {
-                float inv = 1f / Mathf.Sqrt(ratio);
-                m_budgetScale *= 1f + (inv - 1f) * 0.3f;
-                m_budgetScale = Mathf.Clamp(m_budgetScale, 0.01f, 1f);  // ≤1: ceiling, never upgrade
-            }
-
-            // Over budget: repeatedly degrade from the far end until we fit (or nothing can
-            // degrade further — budget smaller than every chunk at its coarsest level, in which
-            // case the pool Fill drops the remainder and OverflowCount reports it). Under budget
-            // we do nothing: the distance selection stands.
-            bool changed = true;
-            while (total > budget && changed)
-            {
-                changed = false;
-                for (int i = active - 1; i >= 0 && total > budget; i--)
+                int c = m_bucketOrder[i];
+                int L = (int)m_selectedLevel[c];
+                while (total > budget)
                 {
-                    int c = m_bucketOrder[i];
-                    int L = (int)m_selectedLevel[c];
                     int nl = NextPresentLevel(table, c, L, +1);
-                    if (nl < 0) continue;
+                    if (nl < 0) break;                       // this chunk is at its coarsest
                     total -= (long)table.Chunks[c].Lods[L].Count - table.Chunks[c].Lods[nl].Count;
                     m_selectedLevel[c] = (uint)nl;
-                    changed = true;
+                    L = nl;
                 }
             }
             return (int)total;
