@@ -360,28 +360,31 @@ namespace Gsplat
                         m_chunkTableParsed = GsplatChunkTable.Parse(ChunkTable.text);
                         m_chunkTableSource = ChunkTable;
                     }
-                    // Scene-adaptive LOD range: a fixed multiplier (e.g. 3) spreads the ladder far
-                    // beyond a compact scene so only LOD0-2 are ever reachable by distance. When
-                    // ChunkedLodAutoRange is on, derive BOTH the LOD0 near-shell (base) and the
-                    // step (multiplier) so the full ladder maps onto the scene as a near→far
-                    // gradient. Overrides the manual ChunkedLodMultiplier and CLAMPS the base.
+                    // Scene-adaptive LOD range. The MULTIPLIER is fixed at the physically-correct
+                    // 2.0, NOT derived from the scene diagonal. The baker (bake_chunks.py,
+                    // level_ratio 0.5 + doubling voxel cell) makes each coarser level's splats ~2×
+                    // larger, so on-screen splat size stays constant only when the LOD climbs one
+                    // level per DISTANCE DOUBLING — i.e. mult = 2. The old autoRange force-mapped all
+                    // 11 levels onto the ~43 m diagonal, giving effMult ≈ 1.30 (a level every ~1.3×
+                    // distance), which is ~4× too aggressive: coarse levels landed in the NEAR field
+                    // (a 7 m wall drew LOD5, 32× fewer splats) → blobby up close while the same
+                    // coarseness looked fine far away (few screen pixels). That read as "quality
+                    // rises with distance". mult = 2 keeps near crisp (7 m → LOD1); the far field is
+                    // coarsened by distance (≈LOD4 at 30–43 m) AND the strict far-first budget
+                    // balancer (2 M ceiling vs 9.65 M LOD0 total).
                     //
-                    // Why the base MUST be clamped: the band test is `d < base ? LOD0 : …`, so a
-                    // base ≥ the scene diagonal collapses the WHOLE scene into the LOD0 shell —
-                    // distance-LOD is silently defeated and only the budget balancer (far-first)
-                    // coarsens anything, which reads as "inverted" (far looks high quality). We cap
-                    // the base at diag/1.3^(maxLod-1) so the ladder always spans the scene with at
-                    // least a 1.3× step, even if the authored base is pathologically large.
+                    // AutoRange is still ON only to keep the base≥diagonal GUARD: the band test is
+                    // `d < base ? LOD0 : …`, so a base ≥ the scene diagonal would collapse the whole
+                    // scene into the LOD0 shell (the old "inverted, far looks best" bug). We cap the
+                    // base at diag/4 (soft — the authored 5 m passes through on this 43 m scene) so a
+                    // pathologically large authored base can never defeat distance-LOD.
                     float effBase = ChunkedLodBaseDistance;
                     float effMult = ChunkedLodMultiplier;
                     if (ChunkedLodAutoRange && m_chunkTableParsed.MaxLod > 1)
                     {
-                        int maxLod = m_chunkTableParsed.MaxLod;
                         float diag = m_chunkTableParsed.Bounds.size.magnitude;
-                        float baseCap = diag / Mathf.Pow(1.3f, maxLod - 1);          // LOD0-shell ceiling
-                        effBase = Mathf.Clamp(ChunkedLodBaseDistance, 0.01f, baseCap);
-                        effMult = Mathf.Max(1.2f,
-                            Mathf.Pow(Mathf.Max(1.001f, diag / effBase), 1f / (maxLod - 1)));
+                        effBase = Mathf.Min(ChunkedLodBaseDistance, diag / 4f);   // base≥diag guard only
+                        effMult = 2.0f;                                          // SSE-correct for the 2× merge ladder
                     }
                     m_lastEffectiveBase = effBase;
                     m_lastEffectiveMultiplier = effMult;
