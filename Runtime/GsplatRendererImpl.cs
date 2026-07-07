@@ -313,6 +313,14 @@ namespace Gsplat
                 m_propertyBlock.SetBuffer(k_fadeWeightBuffer, m_fadeWeightBuffer);
                 m_propertyBlock.SetFloat(k_lodFadeEnabled, fade ? 1f : 0f);
             }
+            // Camera-move gate (roadmap item c): while the camera is still, the per-chunk selection
+            // and the appended order buffer are unchanged, so skip the O(chunks) CPU select AND the
+            // O(UploadedCount) GPU InitOrderChunked dispatch + its BLOCKING ExtractOrderSize readback
+            // (the pool path already gates this way). The sort still re-runs each frame over the
+            // retained order (SortMode), and the draw reuses m_remainingCount — correct for a static
+            // camera. m_remainingCount==0 forces the first build; rotation past the gate rebuilds.
+            if (m_remainingCount > 0 && camera != null && !CameraMovedSinceLastCull(camera))
+                return;
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, behindPenalty, cull, cullMargin, splatBudget > 0, hysteresis, hyst,
                 cullFootprintScale, fade, fadeWidth);
@@ -359,6 +367,12 @@ namespace Gsplat
             cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
             m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
             m_bounds = m_gsplatAsset.Bounds;
+            // Stamp the cull pose so the camera-move gate above skips rebuilds while still.
+            if (camera != null)
+            {
+                m_lastCullCamPos = camera.transform.position;
+                m_lastCullCamRot = camera.transform.eulerAngles;
+            }
         }
 
         // Pick one LOD level per chunk into m_selectedLevel (0xFFFFFFFF = culled): FOV-comp
