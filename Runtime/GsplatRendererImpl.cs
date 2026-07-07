@@ -298,20 +298,15 @@ namespace Gsplat
             cs.SetBuffer(kernel, k_splatChunkBuffer, m_splatChunkBuffer);
             cs.SetBuffer(kernel, k_selectedLevelBuffer, m_selectedLevelBuffer);
 
-            // Two-tier frustum cull: (1) per-CHUNK footprint-sphere test in ComputeSelectedLevels
-            // drops whole off-screen chunks (PlayCanvas per-node parity, budget efficiency);
-            // (2) per-SPLAT FOOTPRINT test here smooths the frustum edge of kept chunks — each
-            // splat survives unless its OWN 3σ footprint is fully outside, so nothing visible is
-            // stripped (unlike the old centre-only test that emptied edge chunks at low margin)
-            // and there is no whole-chunk pop. cullMargin adds hysteresis on top of the footprint.
-            if (cull && camera != null)
-            {
-                BuildObjectSpaceFrustumPlanes(camera, matrixWorld);
-                cs.EnableKeyword("FRUSTUM_CULL");
-                cs.SetVectorArray(k_frustumPlanes, m_frustumPlanesOS);
-                cs.SetFloat(k_cullMargin, cullMargin);
-            }
-            else cs.DisableKeyword("FRUSTUM_CULL");
+            // Frustum culling is PER-CHUNK ONLY (footprint-sphere test in ComputeSelectedLevels,
+            // PlayCanvas per-node parity). The per-SPLAT footprint test was REMOVED: at a portrait
+            // view it stripped ~56% of the selected splats — including on-screen vault/window
+            // content — because a kept edge chunk's splats near the frustum boundary were rejected
+            // even though the chunk (and much of its content) is visible. A whole-chunk cull that
+            // keeps every chunk with any visible content, plus drawing all its splats, matches
+            // PlayCanvas and the requirement "don't cull what's in view". cullMargin now only
+            // widens the per-chunk sphere test.
+            cs.DisableKeyword("FRUSTUM_CULL");
 
             cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
             m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
