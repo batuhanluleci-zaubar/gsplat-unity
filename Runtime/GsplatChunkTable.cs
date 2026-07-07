@@ -56,6 +56,14 @@ namespace Gsplat
             var m = JsonUtility.FromJson<ManifestJson>(json);
             if (m == null || m.chunks == null)
                 throw new ArgumentException("Invalid chunk table JSON");
+            // The per-splat _SplatChunk tag packs the level into the low 4 bits ((chunkId<<4)|(L&0xF),
+            // see BuildSplatChunkTags / InitOrderChunked.compute), so LOD levels above 15 would
+            // silently ALIAS onto lower ones and corrupt selection. Fail loudly at load instead. (P3.2)
+            if (m.maxLod > 15)
+                throw new ArgumentException(
+                    $"Chunk table maxLod={m.maxLod} exceeds the 4-bit LOD-tag limit (15); levels would " +
+                    "alias in the _SplatChunk tag. Re-bake with <=16 LODs, or widen the tag packing " +
+                    "(GsplatChunkTable.BuildSplatChunkTags + InitOrderChunked.compute).");
 
             var t = new GsplatChunkTable
             {
