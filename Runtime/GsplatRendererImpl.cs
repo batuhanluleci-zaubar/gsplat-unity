@@ -176,6 +176,43 @@ namespace Gsplat
             return count[0];
         }
 
+        // A3: dispatch InitOrderPool over the resident pool (O(UsedEnd), not O(UploadedCount)),
+        // optionally applying the SAME per-splat frustum cull the combined path uses, and RETURN the
+        // count to draw/sort. With perSplatCull the GPU appends FEWER than the live count, so the
+        // CPU-side LiveCount (fallbackVisible) is stale/too-large (OrderBuffer contents aren't cleared,
+        // only its counter reset) — we MUST read back the true appended count via CopyCount so
+        // sort/depth/draw don't run over stale tail entries. With cull off, we keep the readback-free
+        // CPU-count fast path (unchanged behaviour, no regression). Shared by DispatchChunkedPool and
+        // DispatchStreamingPool.
+        uint DispatchInitOrderPool(ComputeShader cs, Matrix4x4 matrixWorld, Camera camera,
+            bool perSplatCull, float cullMargin, uint fallbackVisible)
+        {
+            SorterResource.OrderBuffer.SetCounterValue(0);
+            if (m_poolLayout.UsedEnd <= 0 || m_poolLiveMaskBuffer == null)
+                return fallbackVisible;
+
+            int kernel = cs.FindKernel("InitOrderPool");
+            cs.SetInt(k_splatCount, m_poolLayout.UsedEnd);
+            cs.SetBuffer(kernel, k_orderBuffer, SorterResource.OrderBuffer);
+            cs.SetBuffer(kernel, k_poolLiveMask, m_poolLiveMaskBuffer);
+
+            bool doCull = perSplatCull && camera != null;
+            if (doCull)
+            {
+                BuildObjectSpaceFrustumPlanes(camera, matrixWorld);
+                cs.EnableKeyword("FRUSTUM_CULL");
+                cs.SetVectorArray(k_frustumPlanes, m_frustumPlanesOS);
+                cs.SetFloat(k_cullMargin, cullMargin);
+                cs.SetBuffer(kernel, k_packedSplatsBuffer,
+                    ((GsplatResourceSpark)GsplatResource).PackedSplatsBuffer);   // resident pool buffer
+            }
+            else cs.DisableKeyword("FRUSTUM_CULL");
+
+            cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp((uint)m_poolLayout.UsedEnd, 1024), 1, 1);
+
+            return doCull ? ExtractOrderSize(SorterResource.OrderBuffer) : fallbackVisible;
+        }
+
         public void DispatchInitOrder(GsplatCutout[] cutouts, Matrix4x4 matrixWorld, bool cutoutsUpdateBounds,
             Camera cullCamera = null, float cullMargin = 0f)
         {
@@ -780,7 +817,7 @@ namespace Gsplat
         public void DispatchChunkedPool(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
-            float hyst, float cullFootprintScale, bool incrementalRefill,
+            float hyst, float cullFootprintScale, bool incrementalRefill, bool perSplatCull,
             bool sseEnabled, float targetPx, float spacingGrowth)
         {
             // 4a: normally the incremental (holey) pool can't be consumed by the cross-renderer global
@@ -843,16 +880,9 @@ namespace Gsplat
 
                 // Rebuild the appended visible order from the liveness mask. RemainingCount is
                 // known CPU-side (allocator LiveCount) — no counter readback needed.
-                SorterResource.OrderBuffer.SetCounterValue(0);
-                if (m_poolLayout.UsedEnd > 0 && m_poolLiveMaskBuffer != null)
-                {
-                    int kernel = cs.FindKernel("InitOrderPool");
-                    cs.SetInt(k_splatCount, m_poolLayout.UsedEnd);
-                    cs.SetBuffer(kernel, k_orderBuffer, SorterResource.OrderBuffer);
-                    cs.SetBuffer(kernel, k_poolLiveMask, m_poolLiveMaskBuffer);
-                    cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp((uint)m_poolLayout.UsedEnd, 1024), 1, 1);
-                }
-                m_remainingCount = visible;
+                // A3: dispatch InitOrderPool with the per-splat frustum cull; RemainingCount is the
+                // readback of the culled appended count (or the CPU LiveCount when cull is off).
+                m_remainingCount = DispatchInitOrderPool(cs, matrixWorld, camera, perSplatCull, cullMargin, visible);
                 SorterResource.Initialized = true;   // the appended subset IS the sort payload;
                                                      // identity InitPayload must not overwrite it
             }
@@ -883,7 +913,7 @@ namespace Gsplat
         public void DispatchStreamingPool(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
-            float hyst, float cullFootprintScale, byte shBands,
+            float hyst, float cullFootprintScale, byte shBands, bool perSplatCull,
             bool sseEnabled, float targetPx, float spacingGrowth)
         {
             if (cs == null) return;
@@ -935,16 +965,9 @@ namespace Gsplat
                 m_poolLiveMaskBuffer.SetData(mask);
                 m_poolLayout.MaskDirty = false;
             }
-            SorterResource.OrderBuffer.SetCounterValue(0);
-            if (m_poolLayout.UsedEnd > 0 && m_poolLiveMaskBuffer != null)
-            {
-                int kernel = cs.FindKernel("InitOrderPool");
-                cs.SetInt(k_splatCount, m_poolLayout.UsedEnd);
-                cs.SetBuffer(kernel, k_orderBuffer, SorterResource.OrderBuffer);
-                cs.SetBuffer(kernel, k_poolLiveMask, m_poolLiveMaskBuffer);
-                cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp((uint)m_poolLayout.UsedEnd, 1024), 1, 1);
-            }
-            m_remainingCount = visible;
+            // A3: dispatch InitOrderPool with the per-splat frustum cull; RemainingCount is the
+            // readback of the culled appended count (or the CPU LiveCount when cull is off).
+            m_remainingCount = DispatchInitOrderPool(cs, matrixWorld, camera, perSplatCull, cullMargin, visible);
             SorterResource.Initialized = true;
             m_bounds = m_gsplatAsset.Bounds;
         }

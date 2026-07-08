@@ -97,6 +97,22 @@ void InitOrderPool(uint3 id : SV_DispatchThreadID)
     uint idx = id.x;
     if (idx >= _SplatCount)
         return;
-    if ((_PoolLiveMask[idx >> 5u] >> (idx & 31u)) & 1u)
-        _OrderBuffer.Append(idx);
+    // Live-mask check FIRST: a hole (freed / not-yet-loaded slot, bit 0) returns before the
+    // frustum test ever reads _PackedSplatsBuffer[idx], so STALE packed data at a hole is never
+    // footprint-tested (garbage could otherwise pass the test and append a bad index).
+    if (!(((_PoolLiveMask[idx >> 5u] >> (idx & 31u)) & 1u)))
+        return;
+
+#ifdef FRUSTUM_CULL
+    // A3: per-splat frustum cull on the resident pool — the SAME 3σ-footprint test the combined
+    // InitOrderChunked kernel uses, so the pool draws only the VISIBLE subset (not the whole
+    // resident set). Pool slots are copied verbatim from the object-space asset, so this reads the
+    // right splat. RemainingCount must then come from a CopyCount readback (fewer appended than live).
+    uint4 ps = _PackedSplatsBuffer[idx];
+    float3 pos = float3(f16tof32(ps.y & 0xFFFFu), f16tof32((ps.y >> 16u) & 0xFFFFu), f16tof32(ps.z & 0xFFFFu));
+    if (!FootprintInFrustum(pos, SplatFootprint(ps)))
+        return;
+#endif
+
+    _OrderBuffer.Append(idx);
 }
