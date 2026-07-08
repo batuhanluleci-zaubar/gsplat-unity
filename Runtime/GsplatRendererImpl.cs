@@ -29,6 +29,7 @@ namespace Gsplat
         // the sort/depth/draw dispatch size) and this buffer holds the exact drawn count the depth-mask
         // and the fragment shader use to discard the sorted-to-back tail.
         public GraphicsBuffer DrawCountBuffer { get; private set; }
+        GraphicsBuffer m_drawArgsBuffer;   // indexed indirect draw args (5 uints), written by BuildDrawArgs
         bool m_indirectActive;
         public ISorterResource SorterResource { get; private set; }
 
@@ -55,6 +56,10 @@ namespace Gsplat
         static readonly int k_poolLiveMask = Shader.PropertyToID("_PoolLiveMask");
         static readonly int k_useCountBuffer = Shader.PropertyToID("_UseCountBuffer");
         static readonly int k_splatCountBuffer = Shader.PropertyToID("_SplatCountBuffer");
+        static readonly int k_drawCountBuffer = Shader.PropertyToID("_DrawCountBuffer");
+        static readonly int k_drawArgs = Shader.PropertyToID("_DrawArgs");
+        static readonly int k_meshIndexCount = Shader.PropertyToID("_MeshIndexCount");
+        static readonly int k_drawInstanceSize = Shader.PropertyToID("_DrawInstanceSize");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -458,6 +463,15 @@ namespace Gsplat
                 GraphicsBuffer.CopyCount(SorterResource.OrderBuffer, DrawCountBuffer, 0);
                 m_remainingCount = (uint)m_lastBalancedTotal;
                 SorterResource.DrawCountBuffer = DrawCountBuffer;
+                // Write the EXACT indexed-draw command from the GPU count so the draw dispatches only
+                // ceil(count/128) instances (not the capacity) — no vertex-stage over-invocation.
+                int instSize = (int)GsplatSettings.Instance.SplatInstanceSize;
+                int argsKernel = cs.FindKernel("BuildDrawArgs");
+                cs.SetBuffer(argsKernel, k_drawCountBuffer, DrawCountBuffer);
+                cs.SetBuffer(argsKernel, k_drawArgs, m_drawArgsBuffer);
+                cs.SetInt(k_meshIndexCount, 6 * instSize);
+                cs.SetInt(k_drawInstanceSize, instSize);
+                cs.Dispatch(argsKernel, 1, 1, 1);
             }
             else
             {
@@ -1055,6 +1069,7 @@ namespace Gsplat
             CutoutsBuffer = null;
             OrderSizeBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 1, sizeof(uint));
             DrawCountBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
+            m_drawArgsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 5, sizeof(uint));
             BoundsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 6, sizeof(uint));
         }
 
@@ -1091,6 +1106,8 @@ namespace Gsplat
             OrderSizeBuffer = null;
             DrawCountBuffer?.Dispose();
             DrawCountBuffer = null;
+            m_drawArgsBuffer?.Dispose();
+            m_drawArgsBuffer = null;
             BoundsBuffer?.Dispose();
             BoundsBuffer = null;
             m_splatChunkBuffer?.Dispose();
@@ -1245,8 +1262,13 @@ namespace Gsplat
                 layer = layer
             };
 
-            Graphics.RenderMeshPrimitives(rp, GsplatSettings.Instance.Mesh, 0,
-                Mathf.CeilToInt(m_remainingCount / (float)GsplatSettings.Instance.SplatInstanceSize));
+            if (m_indirectActive)
+                // Exact instance count from the GPU append counter (BuildDrawArgs) — the last
+                // partial instance's tail is discarded by the _SplatCountBuffer test in the shader.
+                Graphics.RenderMeshIndirect(rp, GsplatSettings.Instance.Mesh, m_drawArgsBuffer, 1);
+            else
+                Graphics.RenderMeshPrimitives(rp, GsplatSettings.Instance.Mesh, 0,
+                    Mathf.CeilToInt(m_remainingCount / (float)GsplatSettings.Instance.SplatInstanceSize));
         }
     }
 }

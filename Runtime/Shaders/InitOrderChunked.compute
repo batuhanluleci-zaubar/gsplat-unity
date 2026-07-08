@@ -13,6 +13,7 @@
 
 #pragma kernel InitOrderChunked
 #pragma kernel InitOrderPool
+#pragma kernel BuildDrawArgs
 #pragma multi_compile __ FRUSTUM_CULL
 
 uint _SplatCount;                          // combined buffer splat count
@@ -115,4 +116,25 @@ void InitOrderPool(uint3 id : SV_DispatchThreadID)
 #endif
 
     _OrderBuffer.Append(idx);
+}
+
+// Indirect-draw args builder (readback-free path). Reads the GPU append counter (CopyCount'd
+// into _DrawCountBuffer) and writes an indexed indirect-draw command so the draw dispatches the
+// EXACT number of 128-splat instances — no CPU count, and no capacity over-invocation of the
+// vertex stage. Fields: indexCountPerInstance, instanceCount, startIndex, baseVertexIndex,
+// startInstance (Graphics.RenderMeshIndirect / IndirectDrawIndexedArgs layout).
+StructuredBuffer<uint>   _DrawCountBuffer;   // [0] = true appended count
+RWStructuredBuffer<uint> _DrawArgs;          // 5 uints
+uint _MeshIndexCount;                        // = 6 * SplatInstanceSize (mesh index count)
+uint _DrawInstanceSize;                      // = SplatInstanceSize (splats per mesh instance)
+
+[numthreads(1, 1, 1)]
+void BuildDrawArgs(uint3 id : SV_DispatchThreadID)
+{
+    uint count = _DrawCountBuffer[0];
+    _DrawArgs[0] = _MeshIndexCount;
+    _DrawArgs[1] = (count + _DrawInstanceSize - 1u) / _DrawInstanceSize;   // ceil(count / 128)
+    _DrawArgs[2] = 0u;
+    _DrawArgs[3] = 0u;
+    _DrawArgs[4] = 0u;
 }
