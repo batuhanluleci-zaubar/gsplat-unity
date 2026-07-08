@@ -615,6 +615,12 @@ namespace Gsplat
                     // test uses RAW distance (dEff), NOT the band model's fovScale-adjusted d —
                     // folding fovScale in too would double-count FOV.
                     float ph = camera.pixelHeight > 0 ? camera.pixelHeight : Screen.height;
+                    // LOD-selection resolution cap: a fullscreen build renders at native Retina height
+                    // (macOS ignores Screen.SetResolution), which over-refines the SSE LOD (drawn 5-6M).
+                    // Capping ph makes the LOD select as if rendering at maxH — coarser, editor-like drawn
+                    // set — independent of the real surface size. 0 = off.
+                    float maxH = GsplatSettings.Instance.ChunkedLodMaxScreenHeight;
+                    if (maxH > 0f && ph > maxH) ph = maxH;
                     focalPx = ph * 0.5f / Mathf.Max(1e-4f, tanHalfV);
                     logG = Mathf.Log(Mathf.Max(1.01f, spacingGrowth));
                 }

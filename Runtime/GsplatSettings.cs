@@ -143,6 +143,16 @@ namespace Gsplat
         [Range(0f, 1f)]
         public float FoveationCenter = 0.3f;
 
+        [Tooltip("Cap (in px) the render height the screen-error LOD uses for focalPx " +
+                 "(focalPx = pixelHeight/2/tanHalfV). 0 = off (use the real render resolution). A " +
+                 "macOS/Windows fullscreen build renders at NATIVE Retina height (e.g. 2168), which makes " +
+                 "the SSE LOD over-refine (drawn 5-6M vs the editor's ~2M) and tanks fps. Set this to e.g. " +
+                 "1440 so the LOD selects as if rendering at that height — coarsens the drawn set back to " +
+                 "editor behaviour. Unlike Screen.SetResolution (ignored in macOS fullscreen) this is a pure " +
+                 "LOD-selection cap, so it works regardless of the actual surface size. Set at runtime by " +
+                 "GsplatDeviceProfile on standalone desktop.")]
+        public float ChunkedLodMaxScreenHeight = 0f;
+
         public GsplatMaterial[] Materials;
         public Mesh Mesh { get; private set; }
 
