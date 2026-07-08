@@ -144,6 +144,9 @@ namespace Gsplat
                 System.Math.Min(m_remainingCount, GsplatResource.UploadedCount), radial);
 
         public int PoolRepackCount => m_poolLayout?.RepackCount ?? 0;
+        // 4a: exposed to the cross-renderer global merge so it can detect when this pool's live-slot
+        // CONTENTS changed (residency swap) even if UsedEnd/SplatCount didn't — see GsplatChunkPool.Layout.
+        public uint PoolContentVersion => m_poolLayout?.ContentVersion ?? 0;
 
         Bounds ExtractBounds()
         {
@@ -674,8 +677,14 @@ namespace Gsplat
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
             float hyst, float cullFootprintScale, bool incrementalRefill)
         {
+            // 4a: normally the incremental (holey) pool can't be consumed by the cross-renderer global
+            // merge, so global sort forces a contiguous repack (legacy Fill, CPU wholesale re-upload).
+            // With EnableGlobalSortOverPool the global merge consumes the holey pool directly (its
+            // ContentVersion dirty-signal keeps the cached copy fresh), so we stay incremental even under
+            // global sort. Single-renderer scenes: GlobalRenderEnabled is false, so this is unchanged.
             bool useIncremental = incrementalRefill && cs != null &&
-                                  !GsplatSorter.Instance.GlobalRenderEnabled;
+                                  (!GsplatSorter.Instance.GlobalRenderEnabled ||
+                                   GsplatSettings.Instance.EnableGlobalSortOverPool);
             // A holey pool is only valid while the incremental path (InitOrderPool) draws it.
             // If the mode flipped (toggle off, global sort turned on), force a contiguous
             // repack NOW instead of waiting for the camera gate.
@@ -939,6 +948,10 @@ namespace Gsplat
         {
             m_framesBeforeRecomputeSort = 0;
             m_sortsBeforeRecomputeCutouts = 0;
+            // Also invalidate the cull-camera pose so the chunked/streaming cull + LOD selection +
+            // pool residency re-run next frame (not just the sort). Otherwise a GsplatSettings tweak
+            // that affects selection wouldn't apply until the camera moves past the refresh threshold.
+            m_lastCullCamPos = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
         }
 
         public void RefreshOnCameraMove()

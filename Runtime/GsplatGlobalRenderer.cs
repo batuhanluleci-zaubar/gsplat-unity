@@ -21,6 +21,9 @@ namespace Gsplat
         // CPU-side per-renderer metadata (rebuilt when renderers change).
         uint[] m_rendererOffsets; // splat start index in global buffers, per active renderer
         uint[] m_builtSplatCounts; // per-renderer SplatCount captured when the global buffers were last built
+        uint[] m_builtContentVersions; // 4a: per-renderer PoolContentVersion captured at last build; a
+        // pooled renderer can swap live-slot contents while SplatCount(==UsedEnd) is unchanged, so the
+        // count compare alone would cache a stale copy. Mirror of m_builtSplatCounts, checked together.
         uint m_totalSplatCount;
         uint m_totalRemainingCount; // sum of RemainingCounts; valid entries in GlobalOrderBuffer after merge
         byte m_globalSHBands;
@@ -200,6 +203,7 @@ namespace Gsplat
             m_totalSplatCount = 0;
             m_rendererOffsets = new uint[activeGsplats.Count];
             m_builtSplatCounts = new uint[activeGsplats.Count];
+            m_builtContentVersions = new uint[activeGsplats.Count];
             // Size SH buffers to the highest band count in the set; lower-band renderers
             // occupy the extra slots but never read them, since each renderer's SHDegree is
             // clamped to its own asset bands in UpdateRendererParams.
@@ -213,6 +217,7 @@ namespace Gsplat
                 var count = activeGsplats[k].SplatCount;
                 m_rendererOffsets[k] = m_totalSplatCount;
                 m_builtSplatCounts[k] = count;
+                m_builtContentVersions[k] = activeGsplats[k].PoolContentVersion;
                 m_totalSplatCount += count;
             }
 
@@ -258,6 +263,12 @@ namespace Gsplat
 
                 var res = (GsplatResourceSpark)gs.GsplatResource;
 
+                // 4a invariant: for a pooled renderer count==UsedEnd≤Capacity==PackedSplatsBuffer.count,
+                // so the slot-for-slot copy (holes included, never referenced by the order buffer) is
+                // in-bounds. Fail loud in Debug if the count/buffer sizing ever drifts.
+                Debug.Assert(count <= res.PackedSplatsBuffer.count,
+                    $"[GsplatGlobalRenderer] copy count {count} exceeds source buffer {res.PackedSplatsBuffer.count} (renderer {k})");
+
                 CopyUint4(res.PackedSplatsBuffer, m_globalPackedBuffer, count, off);
                 if (m_globalSHBands >= 1 && res.PackedSH1Buffer != null)
                     CopyUint2(res.PackedSH1Buffer, m_globalSH1Buffer, count, off);
@@ -287,7 +298,12 @@ namespace Gsplat
         {
             if (m_builtSplatCounts == null || m_builtSplatCounts.Length != activeGsplats.Count)
                 return true;
-            return activeGsplats.Where((t, k) => m_builtSplatCounts[k] != t.SplatCount).Any();
+            if (m_builtContentVersions == null || m_builtContentVersions.Length != activeGsplats.Count)
+                return true;
+            // 4a: also rebuild when a pooled renderer's live-slot CONTENTS changed (residency swap) even
+            // if its SplatCount(==UsedEnd) is unchanged — otherwise the global copy caches stale splats.
+            return activeGsplats.Where((t, k) => m_builtSplatCounts[k] != t.SplatCount
+                                                 || m_builtContentVersions[k] != t.PoolContentVersion).Any();
         }
 
         void UpdateRendererTransforms(List<IGsplat> activeGsplats)
@@ -549,6 +565,7 @@ namespace Gsplat
             m_mergeScratchDepths = null;
             // Drop the build snapshot so the next EnsureGlobalBuffers re-captures counts from scratch.
             m_builtSplatCounts = null;
+            m_builtContentVersions = null;
         }
     }
 }

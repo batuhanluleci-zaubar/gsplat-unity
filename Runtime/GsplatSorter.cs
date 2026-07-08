@@ -23,6 +23,9 @@ namespace Gsplat
         public GsplatResource GsplatResource { get; }
         public uint SplatCount { get; }
         public byte SHBands { get; }
+        // 4a: bumped when a pooled renderer's live-slot contents change; lets the global merge refresh
+        // its cached copy even when SplatCount is unchanged. 0 for non-pooled renderers.
+        public uint PoolContentVersion { get; }
     }
 
     public interface ISorterResource
@@ -151,6 +154,20 @@ namespace Gsplat
                 Debug.LogError(
                     "[GsplatSorter] Global merge supports at most 255 renderers. Falling back to per-renderer rendering.");
                 return false;
+            }
+
+            // The merged order buffer packs the splat index into the low 24 bits (high 8 = renderer_id,
+            // GsplatMergeOrderBuffers.compute). A renderer with > 2^24 splats (or a pool budget above it)
+            // would truncate its index into the renderer_id field and corrupt the merged draw. Fail safe
+            // to per-renderer rendering rather than corrupt.
+            foreach (var gs in m_activeGsplats)
+            {
+                if (gs.SplatCount > 0x00FFFFFFu)
+                {
+                    Debug.LogError(
+                        $"[GsplatSorter] A renderer has {gs.SplatCount} splats, exceeding the 2^24 global-merge index limit. Disabling global sort for this scene — all renderers fall back to per-renderer rendering.");
+                    return false;
+                }
             }
 
             // Global merge requires every active renderer to use SPARK compression.

@@ -74,6 +74,14 @@ namespace Gsplat
             "When enabled, 2+ active Gaussian splat renderers are merged into a single globally depth-sorted draw call.")]
         public bool EnableGlobalSort;
 
+        [Tooltip(
+            "4a: when a pooled (incremental / disk-streaming) renderer participates in the 2+ renderer global merge, it "
+            + "normally force-repacks its holey budget pool to a contiguous identity layout every refresh (CPU wholesale "
+            + "re-upload). Enable this to instead let the global merge consume the holey pool directly (GPU-side, O(budget) "
+            + "recopy on residency change). Default OFF; only affects scenes with 2+ SPARK renderers where at least one is "
+            + "pooled. Single-renderer scenes are unaffected either way.")]
+        public bool EnableGlobalSortOverPool;
+
         public uint SplatInstanceSize;
         public uint UploadBatchSize;
         [Range(1, 20)] public uint MaxRenderOrder;
@@ -240,6 +248,18 @@ namespace Gsplat
 
             if (GlobalMaterial)
                 GlobalMaterial.Reset();
+
+            // Live-apply while playing: an inspector tweak fires OnValidate, so push it to every
+            // active renderer immediately. Per-frame shader gates (MinPixelSize/MinContribution/
+            // AlphaClip/Foveation) and the freshly-read thresholds already take effect each frame;
+            // ForceRefresh re-runs the camera-gated cull/LOD/residency/sort so selection-side changes
+            // become visible without having to move the camera. Editor-only (OnValidate never runs in builds).
+            if (Application.isPlaying)
+            {
+                GsplatSorter.Instance.MarkGlobalBuffersDirty();
+                foreach (var r in FindObjectsByType<GsplatRenderer>(FindObjectsSortMode.None))
+                    r.ForceRefresh();
+            }
 #endif
         }
 

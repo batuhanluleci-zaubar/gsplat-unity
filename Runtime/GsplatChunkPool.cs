@@ -52,6 +52,11 @@ namespace Gsplat
             public int RepackCount { get; internal set; }
             // Holes exist iff the live splats don't fill [0, UsedEnd) contiguously.
             public bool Holey => LiveCount != UsedEnd;
+            // Monotonic version bumped whenever the resident set CHANGES (allocate/free/reset). The
+            // cross-renderer global merge (4a) caches a copy of the pool: UsedEnd/LiveCount can stay
+            // constant while live-slot CONTENTS change (a chunk freed and a same-size chunk allocated
+            // into the freed hole), so a count/UsedEnd compare misses it — this version does not.
+            public uint ContentVersion { get; private set; }
 
             public void Reset(int capacity)
             {
@@ -70,6 +75,7 @@ namespace Gsplat
                 }
                 else LiveMask = System.Array.Empty<uint>();
                 MaskDirty = true;
+                ContentVersion++;
             }
 
             internal int Allocate(int count)
@@ -92,6 +98,7 @@ namespace Gsplat
                 LiveCount += count;
                 if (offset + count > UsedEnd) UsedEnd = offset + count;
                 MaskDirty = true;
+                ContentVersion++;
             }
 
             internal void FreeBlock(int chunk)
@@ -101,6 +108,7 @@ namespace Gsplat
                 SetMaskRange(b.Offset, b.Count, false);
                 LiveCount -= b.Count;
                 MaskDirty = true;
+                ContentVersion++;
                 InsertFree(b.Offset, b.Count);
                 if (b.Offset + b.Count == UsedEnd)
                 {

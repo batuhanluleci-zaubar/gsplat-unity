@@ -266,6 +266,9 @@ namespace Gsplat
         // IGsplat global-merge members: expose per-renderer GPU buffers for the global sorter.
         public GsplatResource GsplatResource => m_renderer?.GsplatResource;
         public byte SHBands => GsplatAsset?.SHBands ?? 0;
+        // 4a: content-version of this renderer's streaming pool (0 when not pooled), so the global
+        // merge can refresh its cached copy on residency swaps that leave SplatCount unchanged.
+        public uint PoolContentVersion => m_renderer?.PoolContentVersion ?? 0;
 
 
         public uint RemainingCount
