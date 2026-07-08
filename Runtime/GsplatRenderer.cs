@@ -486,10 +486,17 @@ namespace Gsplat
 
             if (Valid && GsplatSettings.Instance.Valid && GsplatSorter.Instance.Valid)
             {
-                m_renderer.EvaluateRefreshRequired(SortMode, SortRefreshRate - 1, CutoutsRefreshRate - 1);
                 // Only cull at runtime: in edit mode Camera.main would cull the Scene view too,
                 // making splats vanish while you look through it.
                 var runtimeCam = Application.isPlaying ? (CullCamera != null ? CullCamera : Camera.main) : null;
+                // The combined chunked (non-pool/non-stream) path early-returns its cull+draw set on a
+                // static camera, so the sort can be skipped on those frames (rank 3, lossless). Gate the
+                // sort on the same camera predicate; pool/streaming/non-culled paths self-manage.
+                bool combinedChunkedCullPath = ChunkedLod && ChunkTable != null && Application.isPlaying
+                    && !PoolMode && !StreamingMode && InitOrderChunkedShader != null
+                    && !GsplatSorter.Instance.GlobalRenderEnabled;
+                m_renderer.EvaluateRefreshRequired(SortMode, SortRefreshRate - 1, CutoutsRefreshRate - 1,
+                    runtimeCam, combinedChunkedCullPath);
 
                 // DISK-streaming branch: chunk-levels stream from .gsstream blobs into the pool.
                 if (StreamingMode && m_streamTable != null)

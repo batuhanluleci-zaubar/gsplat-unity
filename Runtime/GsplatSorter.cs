@@ -216,6 +216,9 @@ namespace Gsplat
             foreach (var gs in m_activeGsplats)
             {
                 if (gs.RemainingCount <= 0) continue;
+                // Depth keys only feed the radix sort — when the sort is gated off this frame
+                // (static camera, retained order), skip the depth dispatch too (same predicate).
+                if (!gs.ComputeSortRequired) continue;
                 gs.ComputeDepth(cmd, camera.worldToCameraMatrix * gs.transform.localToWorldMatrix);
             }
 

@@ -143,7 +143,11 @@ Shader "Gsplat/Standard"
                 float falloff = -exp((maxUV - _ScaleFactor * 1.16) * 25 * _ScaleFactor);
                 // Cross-fade modulates OPACITY only (afade), leaving the Gaussian coverage term
                 // (exp(-A*4)+falloff) intact so the fading splat keeps full footprint to overlap.
-                float afade = 1.0 - pow(max(1e-6, 1.0 - i.color.a), i.fade);
+                // When LOD fade is OFF (default) i.fade==1 so afade==i.color.a exactly — skip the
+                // wasted pow (a log+exp per fragment) via the uniform branch (bit-identical).
+                float afade = (_LodFadeEnabled > 0.5)
+                    ? (1.0 - pow(max(1e-6, 1.0 - i.color.a), i.fade))
+                    : i.color.a;
                 float alpha = (exp(-A * 4.0) + falloff) * afade;
 
                 if (alpha < (_GsplatAlphaClip > 0.0 ? _GsplatAlphaClip : (1.0 / 255.0))) discard;

@@ -1112,7 +1112,7 @@ namespace Gsplat
         }
 
         public void EvaluateRefreshRequired(GsplatRenderer.GsplatSortMode mode, uint sortRefreshRate,
-            uint cutoutsRefreshRate)
+            uint cutoutsRefreshRate, Camera cullCam = null, bool useCameraSortGate = false)
         {
             if (mode == GsplatRenderer.GsplatSortMode.Always)
             {
@@ -1144,6 +1144,20 @@ namespace Gsplat
             }
             else
                 m_framesBeforeRecomputeSort -= 1;
+
+            // Static-camera sort skip (rank 3, lossless): under SortMode.Always the radix re-sorts
+            // the SAME retained OrderBuffer every frame even when nothing moved (~30-60% of a static
+            // frame wasted). Gate the sort on the EXACT predicate the combined-chunked cull rebuild
+            // uses — CameraMovedSinceLastCull reads the pose stamped at the last rebuild (line ~446),
+            // so here (before this frame's DispatchInitOrderChunked) it correctly PREDICTS whether the
+            // cull will early-return. Result: sort is skipped IFF the cull reuses the retained order
+            // → pixel-identical to always-sort on a static view; a gate-crossing frame keeps the sort
+            // (rebuilt set → correct order, no stale-order flicker); first frame forced (count==0).
+            if (useCameraSortGate && ComputeSortRequired && cullCam != null && m_remainingCount > 0
+                && !CameraMovedSinceLastCull(cullCam))
+            {
+                ComputeSortRequired = false;
+            }
         }
 
         /// <summary>
