@@ -93,6 +93,9 @@ namespace Gsplat
         float[] m_chunkDist;                    // per-chunk closest-AABB distance to the camera
         int[] m_chunkBucket;                    // per-chunk √-distance bucket (−1 = culled)
         int[] m_bucketOrder;                    // chunk indices, near bucket first
+        // Per-chunk L0 inter-splat world spacing (screen-error LOD), STATIC per geometry so
+        // computed once per table bind and reused GC-free — NOT recomputed in the per-frame loop.
+        float[] m_chunkSpacingL0;
         readonly int[] m_bucketCount = new int[64];
         readonly int[] m_bucketStart = new int[64];
         readonly int[] m_bucketCursor = new int[64];
@@ -331,7 +334,8 @@ namespace Gsplat
         public void DispatchInitOrderChunked(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst,
-            float cullFootprintScale, bool perSplatCull, bool fade, float fadeWidth)
+            float cullFootprintScale, bool perSplatCull, bool fade, float fadeWidth,
+            bool sseEnabled, float targetPx, float spacingGrowth)
         {
             EnsureChunkSetup(table);
             // The draw shader now reads the per-chunk tag + selected level + fade weight to modulate
@@ -354,7 +358,7 @@ namespace Gsplat
                 return;
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, behindPenalty, cull, cullMargin, splatBudget > 0, hysteresis, hyst,
-                cullFootprintScale, fade, fadeWidth);
+                cullFootprintScale, fade, fadeWidth, sseEnabled, targetPx, spacingGrowth);
             // R3 on the combined path: the distance bands (PlayCanvas parity) only reach a few
             // LODs in a compact scene; the budget balancer is what forces the full ladder into
             // play — degrade the farthest chunks toward LOD max until Σ(selected) <= splatBudget,
@@ -417,7 +421,8 @@ namespace Gsplat
         void ComputeSelectedLevels(GsplatChunkTable table, Matrix4x4 matrixWorld, Camera camera,
             bool distanceLod, int fixedLevel, float baseDistance, float multiplier, float behindPenalty,
             bool cull, float cullMargin, bool budgetBands, bool hysteresis, float hyst,
-            float cullFootprintScale, bool fade, float fadeWidth)
+            float cullFootprintScale, bool fade, float fadeWidth,
+            bool sseEnabled, float targetPx, float spacingGrowth)
         {
             if (!budgetBands) m_budgetScale = 1f;   // corrector only lives while a budget is active
             if (m_selectedLevel == null || m_selectedLevel.Length != table.ChunkCount)
@@ -436,6 +441,27 @@ namespace Gsplat
                 m_chunkDist = new float[table.ChunkCount];
                 m_chunkBucket = new int[table.ChunkCount];
                 m_bucketOrder = new int[table.ChunkCount];
+            }
+            // Per-chunk L0 inter-splat spacing for screen-error LOD, cached (STATIC per geometry):
+            // wsL0 = sqrt(dominant-face-area / L0 count). This is the physical inter-splat pitch on
+            // the surface; projected to pixels it is what the pixel-error test bounds. NOTE: do NOT
+            // fold FootR in — FootR is a whole-chunk reach radius (~metres), not a splat pitch;
+            // mixing it inflates wsL0 ~80x and defeats the whole LOD. Errs slightly FINE (safe).
+            if (sseEnabled && (m_chunkSpacingL0 == null || m_chunkSpacingL0.Length != table.ChunkCount))
+            {
+                m_chunkSpacingL0 = new float[table.ChunkCount];
+                for (int c = 0; c < table.ChunkCount; c++)
+                {
+                    var lods0 = table.Chunks[c].Lods;
+                    int n0 = (lods0 != null && lods0.Length > 0) ? lods0[0].Count : 0;
+                    if (n0 < 2) { m_chunkSpacingL0[c] = Mathf.Max(1e-3f, table.Chunks[c].MaxExtent); continue; }
+                    Vector3 e = table.Chunks[c].Aabb.size;
+                    float a0 = Mathf.Max(e.x, Mathf.Max(e.y, e.z));   // largest extent
+                    float a2 = Mathf.Min(e.x, Mathf.Min(e.y, e.z));   // smallest extent
+                    float a1 = e.x + e.y + e.z - a0 - a2;             // middle extent
+                    float faceArea = Mathf.Max(a0 * a1, 1e-6f);       // dominant surface face
+                    m_chunkSpacingL0[c] = Mathf.Max(1e-4f, Mathf.Sqrt(faceArea / n0));
+                }
             }
             int maxLod = table.MaxLod;
             bool doDistance = distanceLod && camera != null && maxLod > 0;
@@ -458,12 +484,24 @@ namespace Gsplat
             Vector3 fwdLocal = doBehind
                 ? matrixWorld.inverse.MultiplyVector(camera.transform.forward).normalized
                 : Vector3.forward;
-            float fovScale = 1f, invLogMult = 1f;
+            float fovScale = 1f, invLogMult = 1f, focalPx = 1f, logG = 1f;
             if (doDistance)
             {
                 float tanHalfV = Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
                 float tanHalfH = tanHalfV * camera.aspect;
                 fovScale = Mathf.Min(tanHalfV, tanHalfH) / 0.41421356f; // tan(22.5°)
+                if (sseEnabled)
+                {
+                    // Vertical focal length in PIXELS of the RENDER TARGET (camera.pixelHeight —
+                    // respects XR eye buffers / URP render scale / RTs, unlike Screen.height which
+                    // returns the desktop window). A world size S at distance z projects to
+                    // S*focalPx/z pixels. This alone carries the FOV/zoom dependence, so the SSE
+                    // test uses RAW distance (dEff), NOT the band model's fovScale-adjusted d —
+                    // folding fovScale in too would double-count FOV.
+                    float ph = camera.pixelHeight > 0 ? camera.pixelHeight : Screen.height;
+                    focalPx = ph * 0.5f / Mathf.Max(1e-4f, tanHalfV);
+                    logG = Mathf.Log(Mathf.Max(1.01f, spacingGrowth));
+                }
                 // NOTE: the LOD bands are PURE distance — deliberately NOT scaled by a global
                 // budget-demand factor. An earlier Stage-A `m_budgetScale` shrank the bands when
                 // the view was over budget, which coarsened EVERY chunk (near ones included) and,
@@ -480,19 +518,22 @@ namespace Gsplat
             {
                 uint prev = m_selectedLevel[c];   // last frame's decision (0xFFFFFFFF = was culled)
                 var aabb = table.Chunks[c].Aabb;
-                float distRaw = 0f, d = 0f;
+                float distRaw = 0f, d = 0f, dEff = 0f;
                 if (haveCam)
                 {
                     Vector3 closest = Vector3.Max(aabb.min, Vector3.Min(camLocal, aabb.max));
                     distRaw = Vector3.Distance(camLocal, closest) * scale;
-                    d = distRaw * fovScale;
+                    float behindFactor = 1f;
                     if (doBehind && distRaw > 1e-4f)
                     {
                         // t = how far behind the closest point is (0 = beside/ahead, 1 = dead
-                        // behind); cos of the angle to the view axis, local space.
+                        // behind); cos of the angle to the view axis, local space. Off-view chunks
+                        // are inflated so they coarsen first (their budget flows to on-screen).
                         float t = -Vector3.Dot(fwdLocal, closest - camLocal) * scale / distRaw;
-                        if (t > 0f) d *= 1f + t * (behindPenalty - 1f);
+                        if (t > 0f) behindFactor = 1f + t * (behindPenalty - 1f);
                     }
+                    d = distRaw * fovScale * behindFactor;   // band model: FOV-compensated distance
+                    dEff = distRaw * behindFactor;           // SSE model: raw pinhole (focalPx carries FOV)
                     // Balancer buckets are fed the penalized, FOV-scaled distance (PC parity:
                     // their budgetBucket derives from the penalized fovAdjustedDistance), so a
                     // behind chunk is also FIRST in line for budget degrade — otherwise a behind
@@ -502,17 +543,45 @@ namespace Gsplat
                 int req;
                 if (doDistance)
                 {
-                    req = d < baseDistance ? 0
-                        : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
-                    // LOD hysteresis: while d stays inside the PREVIOUS level's band widened by
-                    // ±hyst, keep that level — a small camera move near a band boundary won't
-                    // flip the LOD back and forth.
+                    // SSE band edges (used by req + hysteresis + fade below). Level L occupies
+                    // dEff ∈ [dL0·g^L, dL0·g^(L+1)) with L0 = [0, dL0·g); dL0 is the per-chunk
+                    // distance at which L0's splats first project to targetPx.
+                    float dL0 = sseEnabled ? m_chunkSpacingL0[c] * focalPx / Mathf.Max(1e-4f, targetPx) : 0f;
+                    if (sseEnabled)
+                    {
+                        // Coarsest level whose on-screen splat spacing stays ≤ targetPx. px0 = L0
+                        // spacing in px; if already ≥ target (near/dense) pin to L0 — this is what
+                        // structurally prevents near-field blobbing (no base to mis-size).
+                        float px0 = m_chunkSpacingL0[c] * focalPx / Mathf.Max(1e-4f, dEff);
+                        req = px0 >= targetPx ? 0
+                            : Mathf.Clamp(Mathf.FloorToInt(Mathf.Log(targetPx / px0) / logG), 0, maxLod);
+                    }
+                    else
+                    {
+                        req = d < baseDistance ? 0
+                            : Mathf.Clamp(1 + Mathf.FloorToInt(Mathf.Log(d / baseDistance) * invLogMult), 0, maxLod);
+                    }
+                    // LOD hysteresis: while the distance stays inside the PREVIOUS level's band
+                    // widened by ±hyst, keep that level — a small camera move near a band boundary
+                    // won't flip the LOD back and forth. Band edges + the distance variable BOTH
+                    // differ per mode (SSE: dEff vs dL0·g^L; Band: d vs base·mult^L).
                     if (hysteresis && prev <= (uint)maxLod)
                     {
                         int pl = (int)prev;
-                        float bandLo = pl == 0 ? 0f : baseDistance * Mathf.Pow(multiplier, pl - 1);
-                        float bandHi = baseDistance * Mathf.Pow(multiplier, pl);
-                        if (d >= bandLo * (1f - hyst) && d < bandHi * (1f + hyst)) req = pl;
+                        float bandLo, bandHi, dv;
+                        if (sseEnabled)
+                        {
+                            bandLo = pl == 0 ? 0f : dL0 * Mathf.Pow(spacingGrowth, pl);
+                            bandHi = dL0 * Mathf.Pow(spacingGrowth, pl + 1);
+                            dv = dEff;
+                        }
+                        else
+                        {
+                            bandLo = pl == 0 ? 0f : baseDistance * Mathf.Pow(multiplier, pl - 1);
+                            bandHi = baseDistance * Mathf.Pow(multiplier, pl);
+                            dv = d;
+                        }
+                        if (dv >= bandLo * (1f - hyst) && dv < bandHi * (1f + hyst)) req = pl;
                     }
                 }
                 else req = Mathf.Clamp(fixedLevel, 0, maxLod);
@@ -529,9 +598,21 @@ namespace Gsplat
                 if (fade && doDistance && fadeWidth > 1e-4f
                     && use < maxLod && table.Chunks[c].Lods[use + 1].Count > 0)
                 {
-                    float bandLo = use == 0 ? 0f : baseDistance * Mathf.Pow(multiplier, use - 1);
-                    float bandHi = baseDistance * Mathf.Pow(multiplier, use);
-                    float frac = Mathf.Clamp01((d - bandLo) / Mathf.Max(1e-6f, bandHi - bandLo));
+                    float bandLo, bandHi, dv;
+                    if (sseEnabled)
+                    {
+                        float dL0 = m_chunkSpacingL0[c] * focalPx / Mathf.Max(1e-4f, targetPx);
+                        bandLo = use == 0 ? 0f : dL0 * Mathf.Pow(spacingGrowth, use);
+                        bandHi = dL0 * Mathf.Pow(spacingGrowth, use + 1);
+                        dv = dEff;
+                    }
+                    else
+                    {
+                        bandLo = use == 0 ? 0f : baseDistance * Mathf.Pow(multiplier, use - 1);
+                        bandHi = baseDistance * Mathf.Pow(multiplier, use);
+                        dv = d;
+                    }
+                    float frac = Mathf.Clamp01((dv - bandLo) / Mathf.Max(1e-6f, bandHi - bandLo));
                     float fz = Mathf.Clamp01(fadeWidth);
                     if (frac > 1f - fz)
                         m_fadeWeight[c] = (uint)Mathf.Clamp(Mathf.RoundToInt((frac - (1f - fz)) / fz * 255f), 0, 255);
@@ -699,7 +780,8 @@ namespace Gsplat
         public void DispatchChunkedPool(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
-            float hyst, float cullFootprintScale, bool incrementalRefill)
+            float hyst, float cullFootprintScale, bool incrementalRefill,
+            bool sseEnabled, float targetPx, float spacingGrowth)
         {
             // 4a: normally the incremental (holey) pool can't be consumed by the cross-renderer global
             // merge, so global sort forces a contiguous repack (legacy Fill, CPU wholesale re-upload).
@@ -724,7 +806,8 @@ namespace Gsplat
 
             ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                 baseDistance, multiplier, behindPenalty, cull, cullMargin, budgetBalance, hysteresis, hyst,
-                cullFootprintScale, false, 0f);   // no LOD cross-fade in the streaming pool path (compacts whole chunks)
+                cullFootprintScale, false, 0f,   // no LOD cross-fade in the streaming pool path (compacts whole chunks)
+                sseEnabled, targetPx, spacingGrowth);
             // R3: fit the distance selection into the pool budget (degrade far / upgrade near)
             // so the drawn total is bounded. Budget = the pool capacity (SplatCount in pool mode).
             m_lastBalancedTotal = (budgetBalance && camera != null)
@@ -800,7 +883,8 @@ namespace Gsplat
         public void DispatchStreamingPool(GsplatChunkTable table, ComputeShader cs, Matrix4x4 matrixWorld,
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
-            float hyst, float cullFootprintScale, byte shBands)
+            float hyst, float cullFootprintScale, byte shBands,
+            bool sseEnabled, float targetPx, float spacingGrowth)
         {
             if (cs == null) return;
             m_streamLoader ??= new GsplatStreamingLoader(2);
@@ -821,7 +905,7 @@ namespace Gsplat
             {
                 ComputeSelectedLevels(table, matrixWorld, camera, distanceLod, fixedLevel,
                     baseDistance, multiplier, behindPenalty, cull, cullMargin, budgetBalance, hysteresis, hyst,
-                    cullFootprintScale, false, 0f);
+                    cullFootprintScale, false, 0f, sseEnabled, targetPx, spacingGrowth);
                 m_lastBalancedTotal = (budgetBalance && camera != null)
                     ? ApplyBudgetBalancer(table, (int)SplatCount) : 0;
                 if (camera != null)

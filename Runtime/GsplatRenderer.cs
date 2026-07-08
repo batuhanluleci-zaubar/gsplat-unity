@@ -80,8 +80,30 @@ namespace Gsplat
 
         [Tooltip("Clamp the LOD base distance to a safe near-shell (diag/4) so a too-large authored " +
                  "base can't collapse the scene into the LOD0 shell. Does NOT touch the multiplier — " +
-                 "tune Chunked Lod Multiplier for aggressiveness. Live values shown in the debug panel.")]
+                 "tune Chunked Lod Multiplier for aggressiveness. Live values shown in the debug panel. " +
+                 "(Distance-band / legacy path only — ignored when Screen-Error LOD is on.)")]
         public bool ChunkedLodAutoRange = true;
+
+        [Tooltip("SCREEN-ERROR LOD (recommended). Instead of the distance bands above, pick each " +
+                 "chunk's coarsest LOD whose on-screen splat spacing stays under Target Pixels — using " +
+                 "the chunk's OWN baked density and the real render-target resolution. Auto-adapts to " +
+                 "scene scale + per-chunk density (no base/multiplier tuning, no diag/4 shell), and is " +
+                 "quality-bounded by construction (near/dense chunks stay LOD0, far chunks coarsen only " +
+                 "as far as the pixel budget allows). Off = legacy distance bands (Base/Multiplier).")]
+        public bool ChunkedLodScreenError = true;
+
+        [Tooltip("Screen-error LOD: max on-screen splat SPACING in PIXELS. ~1.5 is visually lossless; " +
+                 "2 is a good default; 3-4 trades slight far-field softening for bigger budget cuts. " +
+                 "Lower = crisper + more splats. NOTE: raising this coarsens the DENSEST near chunks " +
+                 "first, so keep ≲2 unless you accept some near-detail softening.")]
+        [Range(0.5f, 6f)]
+        public float ChunkedLodTargetPixels = 2f;
+
+        [Tooltip("Screen-error LOD: per-level world-spacing growth g. This ladder HALVES the splat " +
+                 "count per level, so g = 2^(1/D): 1.41 for a 2D surface scan (default, correct for " +
+                 "room/object captures), 1.26 for a fully volumetric cloud. Rarely needs changing.")]
+        [Range(1.1f, 2f)]
+        public float ChunkedLodSpacingGrowth = 1.41f;
 
         [Tooltip("LOD penalty for chunks BEHIND the camera: their band distance is inflated up to " +
                  "xN when fully behind (PlayCanvas lodBehindPenalty), so what you can't see coarsens " +
@@ -481,7 +503,8 @@ namespace Gsplat
                         transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
                         sBase, sMult, ChunkedBehindPenalty, ChunkedCull, ChunkedBudgetBalancer,
                         FrustumCullMargin, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
-                        m_streamTable.SHBands);
+                        m_streamTable.SHBands,
+                        ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth);
                 }
                 else if (ChunkedLod && ChunkTable != null && Application.isPlaying)
                 {
@@ -490,34 +513,20 @@ namespace Gsplat
                         m_chunkTableParsed = GsplatChunkTable.Parse(ChunkTable.text);
                         m_chunkTableSource = ChunkTable;
                     }
-                    // Scene-adaptive LOD range. The MULTIPLIER is fixed at the physically-correct
-                    // 2.0, NOT derived from the scene diagonal. The baker (bake_chunks.py,
-                    // level_ratio 0.5 + doubling voxel cell) makes each coarser level's splats ~2×
-                    // larger, so on-screen splat size stays constant only when the LOD climbs one
-                    // level per DISTANCE DOUBLING — i.e. mult = 2. The old autoRange force-mapped all
-                    // 11 levels onto the ~43 m diagonal, giving effMult ≈ 1.30 (a level every ~1.3×
-                    // distance), which is ~4× too aggressive: coarse levels landed in the NEAR field
-                    // (a 7 m wall drew LOD5, 32× fewer splats) → blobby up close while the same
-                    // coarseness looked fine far away (few screen pixels). That read as "quality
-                    // rises with distance". mult = 2 keeps near crisp (7 m → LOD1); the far field is
-                    // coarsened by distance (≈LOD4 at 30–43 m) AND the strict far-first budget
-                    // balancer (2 M ceiling vs 9.65 M LOD0 total).
+                    // LOD selection. DEFAULT is screen-error (ChunkedLodScreenError): each chunk picks
+                    // the coarsest level whose on-screen splat spacing ≤ ChunkedLodTargetPixels, from
+                    // its OWN baked density — effBase/effMult below are then IGNORED (the SSE test has
+                    // no global base/multiplier). This auto-adapts to scene scale and per-chunk density.
                     //
-                    // AutoRange now ONLY guards the base (see below) and otherwise RESPECTS the
-                    // authored ChunkedLodMultiplier, so the LOD aggressiveness is an inspector knob:
-                    //   • mult = 2.0  → SSE-correct: one level per distance DOUBLING. Near stays crisp
-                    //                   (7 m wall → LOD1); in a compact scene the far field only reaches
-                    //                   ~LOD4-6, because higher levels need hundreds of metres.
-                    //   • mult ≈ 1.35 → "fill the scene": all levels map onto the diagonal, so far
-                    //                   corners reach the COARSEST LODs (7-11). Cheapest, but coarse
-                    //                   levels creep into the near field (blobbier up close) — that is
-                    //                   the SSE tradeoff, chosen deliberately when you want far chunks
-                    //                   as light as possible. For N levels over a diagonal D from base
-                    //                   B, the fill value is (D/B)^(1/(N-1)).
-                    // The base is still CLAMPED to diag/4: the band test is `d < base ? LOD0 : …`, so a
-                    // base ≥ the scene diagonal would collapse everything into the LOD0 shell (the old
-                    // "inverted, far looks best" bug). A pathologically large authored base can never
-                    // defeat distance-LOD, but the multiplier is yours to tune.
+                    // The legacy DISTANCE-BAND path (ChunkedLodScreenError=false) uses base·mult^i.
+                    // IMPORTANT (corrected): this ladder HALVES the splat count per level (bake_chunks.py
+                    // level_ratio=0.5, voxel cell binary-searched to hit that count — NOT voxel-edge
+                    // doubling). Halving count on a ~2D surface grows inter-splat spacing by only
+                    // 2^(1/2)≈1.41 per level (measured 1.43), so the SSE-correct band multiplier is
+                    // ~1.41 — NOT 2.0 (which needs spacing to double, an 8× count cut) and definitely
+                    // not 3.0 (~3× too conservative: packs ~3.1 correct levels into one band, which is
+                    // why a compact hall never left LOD0-1). AutoRange still clamps the base to diag/4
+                    // so a too-large base can't collapse everything to the LOD0 shell.
                     float effBase = ChunkedLodBaseDistance;
                     float effMult = ChunkedLodMultiplier;
                     if (ChunkedLodAutoRange && m_chunkTableParsed.MaxLod > 1)
@@ -535,7 +544,8 @@ namespace Gsplat
                             effBase, effMult, ChunkedBehindPenalty, ChunkedCull,
                             ChunkedBudgetBalancer, FrustumCullMargin,
                             ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
-                            ChunkedIncrementalRefill);
+                            ChunkedIncrementalRefill,
+                            ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
@@ -544,7 +554,8 @@ namespace Gsplat
                             ChunkedPerSplatCull,
                             // Fade uses the per-renderer draw shader; the global merged-draw path lacks the
                             // per-splat tag/fade buffers, so auto-disable fade there (would double-darken).
-                            ChunkedLodFade && !GsplatSorter.Instance.GlobalRenderEnabled, ChunkedFadeWidth);
+                            ChunkedLodFade && !GsplatSorter.Instance.GlobalRenderEnabled, ChunkedFadeWidth,
+                            ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth);
                 }
                 else
                 {
