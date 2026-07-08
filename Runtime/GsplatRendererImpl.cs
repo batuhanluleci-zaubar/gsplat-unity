@@ -31,6 +31,14 @@ namespace Gsplat
         public GraphicsBuffer DrawCountBuffer { get; private set; }
         GraphicsBuffer m_drawArgsBuffer;   // indexed indirect draw args (5 uints), written by BuildDrawArgs
         bool m_indirectActive;
+        uint m_asyncDrawnCount;            // last async-read appended count (sort-capacity estimate)
+        bool m_readbackPending;
+
+        void OnDrawCountReadback(UnityEngine.Rendering.AsyncGPUReadbackRequest req)
+        {
+            m_readbackPending = false;
+            if (!req.hasError) m_asyncDrawnCount = req.GetData<uint>()[0];
+        }
         public ISorterResource SorterResource { get; private set; }
 
         static readonly int k_orderBuffer = Shader.PropertyToID("_OrderBuffer");
@@ -461,7 +469,20 @@ namespace Gsplat
             {
                 m_indirectActive = true;
                 GraphicsBuffer.CopyCount(SorterResource.OrderBuffer, DrawCountBuffer, 0);
-                m_remainingCount = (uint)m_lastBalancedTotal;
+                // Sort/depth CAPACITY: the selected total (m_lastBalancedTotal) is a safe upper bound
+                // but the per-splat cull removes ~40-70% of it, so sorting it is wasteful. Tighten it
+                // toward the ACTUAL drawn count via a non-blocking async read of the GPU counter (never
+                // blocks; used ONLY to size the sort, not the draw — the draw is exact via
+                // RenderMeshIndirect, so a stale estimate can't flicker, only under-cover the sort tail
+                // for one frame on a >1.5x reveal). Generous 1.5x margin keeps that rare.
+                if (!m_readbackPending)
+                {
+                    m_readbackPending = true;
+                    UnityEngine.Rendering.AsyncGPUReadback.Request(DrawCountBuffer, OnDrawCountReadback);
+                }
+                m_remainingCount = m_asyncDrawnCount > 0
+                    ? (uint)Mathf.Clamp(m_asyncDrawnCount * 1.5f, 100000f, m_lastBalancedTotal)
+                    : (uint)m_lastBalancedTotal;
                 SorterResource.DrawCountBuffer = DrawCountBuffer;
                 // Write the EXACT indexed-draw command from the GPU count so the draw dispatches only
                 // ceil(count/128) instances (not the capacity) — no vertex-stage over-invocation.

@@ -139,7 +139,7 @@ namespace Gsplat
                  "and discarding the tail. Pixel-identical; removes the per-frame CPU↔GPU sync stall. " +
                  "Requires the budget balancer on (ChunkedSplatBudget>0) to know the capacity; falls " +
                  "back to the blocking readback otherwise.")]
-        public bool ChunkedIndirectDraw = false;
+        public bool ChunkedIndirectDraw = true;
 
         [Tooltip("Scales the per-CHUNK cull radius (the baked exact per-level footprint). Because " +
                  "Gaussian splats are semi-transparent, the tails of OFF-screen splats still add " +
