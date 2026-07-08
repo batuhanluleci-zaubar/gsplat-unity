@@ -97,6 +97,15 @@ namespace Gsplat
         [Range(0.2f, 30f)]
         public float CameraRotationRefreshTreshold;
 
+        [Tooltip("Chunked/streaming cull only: extra half-FOV (degrees) the frustum cull is widened by, " +
+                 "so chunks/splats about to enter view are already drawn. The chunked cull SELECTION is " +
+                 "only rebuilt when the camera moves past the refresh thresholds above; this margin keeps " +
+                 "the drawn set valid in between, killing the 'walls/chunks vanish when you turn' stale-cull. " +
+                 "Set >= CameraRotationRefreshTreshold. 0 = exact frustum (no cushion). ~4 deg is a good start; " +
+                 "higher = safer but draws a wider border (fill cost).")]
+        [Range(0f, 20f)]
+        public float CullFrustumMarginDeg = 4f;
+
         public bool ShowImportErrors;
 
         [Tooltip("Discard splats whose projected diameter is below this many pixels (PlayCanvas " +
@@ -184,6 +193,7 @@ namespace Gsplat
             DisplayBoundingBoxes = false;
             CameraTranslationRefreshTreshold = 0.2f;
             CameraRotationRefreshTreshold = 10;
+            CullFrustumMarginDeg = 4f;
             ShowImportErrors = true;
             MinPixelSize = 2f;
             MinContribution = 3f;

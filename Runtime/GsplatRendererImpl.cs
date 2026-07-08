@@ -68,7 +68,7 @@ namespace Gsplat
         // — we rebuild it only past the same thresholds as sort refresh, not every frame.
         // Seeded to infinity so the first frustum dispatch always runs.
         Vector3 m_lastCullCamPos = new(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
-        Vector3 m_lastCullCamRot;
+        Quaternion m_lastCullCamRot = Quaternion.identity;   // quaternion (not euler): Quaternion.Angle is wrap/gimbal-safe
 
         // Chunked-LOD runtime state (see docs/CHUNKED_LOD_DESIGN.md, GsplatChunkTable).
         GsplatChunkTable m_chunkTable;
@@ -249,7 +249,7 @@ namespace Gsplat
             if (frustum)
             {
                 m_lastCullCamPos = cullCamera.transform.position;
-                m_lastCullCamRot = cullCamera.transform.eulerAngles;
+                m_lastCullCamRot = cullCamera.transform.rotation;
             }
         }
 
@@ -257,10 +257,33 @@ namespace Gsplat
         // the last frustum InitOrder. Matches RefreshOnCameraMove's naive euler comparison.
         bool CameraMovedSinceLastCull(Camera cam)
         {
-            var pos = cam.transform.position;
-            var rot = cam.transform.eulerAngles;
-            return (pos - m_lastCullCamPos).magnitude > GsplatSettings.Instance.CameraTranslationRefreshTreshold
-                || (rot - m_lastCullCamRot).magnitude > GsplatSettings.Instance.CameraRotationRefreshTreshold;
+            // Quaternion.Angle gives the TRUE angular delta in degrees — the old euler-magnitude
+            // `(rot-last).magnitude` mis-measured near 0/360 wrap and gimbal, so the gate could
+            // UNDER-fire and leave the cull stale by far more than the threshold (the root of the
+            // "wall vanishes when you turn" bug). The angular cull margin (CalcCullFrustumPlanes)
+            // then covers the remaining ≤threshold lag between refreshes.
+            return (cam.transform.position - m_lastCullCamPos).magnitude > GsplatSettings.Instance.CameraTranslationRefreshTreshold
+                || Quaternion.Angle(cam.transform.rotation, m_lastCullCamRot) > GsplatSettings.Instance.CameraRotationRefreshTreshold;
+        }
+
+        // Camera frustum planes widened by GsplatSettings.CullFrustumMarginDeg of extra half-FOV, so the
+        // gated chunked/streaming cull SELECTION (rebuilt only past the refresh thresholds) stays valid
+        // as the camera moves in between — content about to enter view is already drawn. Scales the real
+        // projectionMatrix x/y (convention-safe; near/far unchanged). margin<=0 or ortho => plain frustum.
+        static void CalcCullFrustumPlanes(Camera cam, Plane[] dst)
+        {
+            float marginDeg = GsplatSettings.Instance.CullFrustumMarginDeg;
+            if (marginDeg <= 0f || cam.orthographic)
+            {
+                GeometryUtility.CalculateFrustumPlanes(cam, dst);
+                return;
+            }
+            float fov = cam.fieldOfView;
+            float wide = Mathf.Min(179f, fov + 2f * marginDeg);
+            float s = Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad) / Mathf.Tan(wide * 0.5f * Mathf.Deg2Rad); // <1 widens
+            Matrix4x4 p = cam.projectionMatrix;
+            p.m00 *= s; p.m11 *= s;
+            GeometryUtility.CalculateFrustumPlanes(p * cam.worldToCameraMatrix, dst);
         }
 
         // Builds the 6 camera frustum planes in the asset's object space (inward normals,
@@ -268,7 +291,7 @@ namespace Gsplat
         // world plane P satisfies P·(M·x) = (Mᵀ·P)·x — hence the transpose pull-back.
         void BuildObjectSpaceFrustumPlanes(Camera cam, Matrix4x4 localToWorld)
         {
-            GeometryUtility.CalculateFrustumPlanes(cam, m_frustumPlanes);
+            CalcCullFrustumPlanes(cam, m_frustumPlanes);   // widened by CullFrustumMarginDeg (anti stale-cull)
             Matrix4x4 mt = localToWorld.transpose;
             for (int i = 0; i < 6; i++)
             {
@@ -379,7 +402,7 @@ namespace Gsplat
             if (camera != null)
             {
                 m_lastCullCamPos = camera.transform.position;
-                m_lastCullCamRot = camera.transform.eulerAngles;
+                m_lastCullCamRot = camera.transform.rotation;
             }
         }
 
@@ -416,7 +439,7 @@ namespace Gsplat
             int maxLod = table.MaxLod;
             bool doDistance = distanceLod && camera != null && maxLod > 0;
             bool doCull = cull && camera != null;
-            if (doCull) GeometryUtility.CalculateFrustumPlanes(camera, m_worldFrustumPlanes);
+            if (doCull) CalcCullFrustumPlanes(camera, m_worldFrustumPlanes);   // widened by CullFrustumMarginDeg (anti stale-cull)
 
             var ls = matrixWorld.lossyScale;
             float scale = Mathf.Max(ls.x, Mathf.Max(ls.y, ls.z));
@@ -762,7 +785,7 @@ namespace Gsplat
             if (camera != null)
             {
                 m_lastCullCamPos = camera.transform.position;
-                m_lastCullCamRot = camera.transform.eulerAngles;
+                m_lastCullCamRot = camera.transform.rotation;
             }
         }
 
@@ -803,7 +826,7 @@ namespace Gsplat
                 if (camera != null)
                 {
                     m_lastCullCamPos = camera.transform.position;
-                    m_lastCullCamRot = camera.transform.eulerAngles;
+                    m_lastCullCamRot = camera.transform.rotation;
                 }
             }
 
