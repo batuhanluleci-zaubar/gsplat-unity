@@ -56,6 +56,8 @@ namespace Gsplat
         static readonly int k_matrixMv = Shader.PropertyToID("_MatrixMV");
         static readonly int k_depthBuffer = Shader.PropertyToID("_DepthBuffer");
         static readonly int k_orderBuffer = Shader.PropertyToID("_OrderBuffer");
+        static readonly int k_maskTail = Shader.PropertyToID("_MaskTail");
+        static readonly int k_drawCountBuffer = Shader.PropertyToID("_DrawCountBuffer");
 
         public override void Allocate()
         {
@@ -146,6 +148,14 @@ namespace Gsplat
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSplatsBuffer, res.PackedSplatsBuffer);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_depthBuffer, sorterResource.InputKeys);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_orderBuffer, sorterResource.OrderBuffer);
+            // Indirect (readback-free) path: `count` is the CPU capacity (selectedTotal); mask the
+            // stale tail [trueCount, count) to +inf via the GPU count. Readback path: DrawCountBuffer
+            // is null, mask off, and `count` is already the exact appended count (dummy-bind to keep
+            // strict backends happy about the declared buffer).
+            bool mask = sorterResource.DrawCountBuffer != null;
+            cmd.SetComputeIntParam(cs, k_maskTail, mask ? 1 : 0);
+            cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_drawCountBuffer,
+                mask ? sorterResource.DrawCountBuffer : sorterResource.OrderBuffer);
             cmd.DispatchCompute(cs, kernelCalcDepthSpark, (int)GsplatUtils.DivRoundUp(count, 1024), 1, 1);
         }
 

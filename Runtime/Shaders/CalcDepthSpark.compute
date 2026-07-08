@@ -8,8 +8,10 @@
 uint _SplatCount;
 float4x4 _MatrixMV;
 int _RadialDepth;                 // 0 = view-space Z (directional), 1 = radial distance
+int _MaskTail;                    // indirect path: 1 = mask order slots >= _DrawCountBuffer[0]
 StructuredBuffer<uint4> _PackedSplatsBuffer;
 StructuredBuffer<uint> _OrderBuffer;
+StructuredBuffer<uint> _DrawCountBuffer;  // [0] = true appended count (GPU, via CopyCount)
 RWStructuredBuffer<float> _DepthBuffer;
 
 [numthreads(GROUP_SIZE,1,1)]
@@ -18,6 +20,15 @@ void CalcDepthSpark(uint3 id : SV_DispatchThreadID)
     uint idx = id.x;
     if (idx >= _SplatCount)
         return;
+
+    // Indirect (readback-free) path: the dispatch is sized to the CPU capacity (selectedTotal),
+    // which is >= the true appended count. Slots [trueCount, capacity) hold stale ids — give them
+    // +inf depth so the radix sorts them to the BACK; the draw then discards order >= trueCount.
+    if (_MaskTail != 0 && idx >= _DrawCountBuffer[0])
+    {
+        _DepthBuffer[idx] = 3.4e38f;
+        return;
+    }
 
     uint4 word = _PackedSplatsBuffer[_OrderBuffer[idx]];
     float3 pos = float3(f16tof32(word.y & 0xffffu), f16tof32((word.y >> 16u) & 0xffffu), f16tof32(word.z & 0xffffu));

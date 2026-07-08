@@ -37,6 +37,12 @@ Shader "Gsplat/Standard"
 
             bool _GammaToLinear;
             int _SplatCount;
+            // Indirect (readback-free) draw: when >0.5 the true drawn count is read from
+            // _SplatCountBuffer[0] (GPU append counter, no CPU readback) instead of the _SplatCount
+            // uniform, so the draw can dispatch a fixed CPU capacity (selectedTotal instances) and
+            // discard the sorted-to-back tail here. Default 0 keeps every other draw path on the uniform.
+            float _UseCountBuffer;
+            StructuredBuffer<uint> _SplatCountBuffer;
             int _SplatInstanceSize;
             int _SHDegree;
             float4x4 _MATRIX_M;
@@ -68,7 +74,8 @@ Shader "Gsplat/Standard"
                 source.order = unity_InstanceID * _SplatInstanceSize + asuint(v.vertex.z);
                 #endif
 
-                if (source.order >= _SplatCount)
+                uint splatCount = (_UseCountBuffer > 0.5) ? _SplatCountBuffer[0] : (uint)_SplatCount;
+                if (source.order >= splatCount)
                     return false;
 
                 source.id = _OrderBuffer[source.order];

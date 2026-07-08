@@ -29,6 +29,8 @@ namespace Gsplat
         static readonly int k_matrixMv = Shader.PropertyToID("_MatrixMV");
         static readonly int k_depthBuffer = Shader.PropertyToID("_DepthBuffer");
         static readonly int k_orderBuffer = Shader.PropertyToID("_OrderBuffer");
+        static readonly int k_maskTail = Shader.PropertyToID("_MaskTail");
+        static readonly int k_drawCountBuffer = Shader.PropertyToID("_DrawCountBuffer");
 
         public override void Allocate()
         {
@@ -107,6 +109,10 @@ namespace Gsplat
             cmd.SetComputeBufferParam(cs, kernelCalcDepth, k_positionBuffer, res.PositionBuffer);
             cmd.SetComputeBufferParam(cs, kernelCalcDepth, k_depthBuffer, sorterResource.InputKeys);
             cmd.SetComputeBufferParam(cs, kernelCalcDepth, k_orderBuffer, sorterResource.OrderBuffer);
+            bool mask = sorterResource.DrawCountBuffer != null;
+            cmd.SetComputeIntParam(cs, k_maskTail, mask ? 1 : 0);
+            cmd.SetComputeBufferParam(cs, kernelCalcDepth, k_drawCountBuffer,
+                mask ? sorterResource.DrawCountBuffer : sorterResource.OrderBuffer);
             cmd.DispatchCompute(cs, kernelCalcDepth, (int)GsplatUtils.DivRoundUp(count, 1024), 1, 1);
         }
 

@@ -33,6 +33,11 @@ namespace Gsplat
         public GraphicsBuffer OrderBuffer { get; }
         public GraphicsBuffer InputKeys { get; }
         public bool Initialized { get; set; }
+        // Indirect path: GPU-resident true appended count (via CopyCount, no CPU readback). When set,
+        // the depth pass runs over the CPU capacity (selectedTotal) and masks order slots >= this
+        // count to +inf so the stale tail sorts to the back and is discarded by the draw. Null on
+        // the readback path (count is CPU-known and the dispatch is already exactly sized).
+        public GraphicsBuffer DrawCountBuffer { get; set; }
         public void Dispose();
     }
 
@@ -47,6 +52,7 @@ namespace Gsplat
             public GraphicsBuffer InputKeys { get; private set; }
             public GsplatSortPass.SupportResources Resources { get; }
             public bool Initialized { get; set; }
+            public GraphicsBuffer DrawCountBuffer { get; set; }   // indirect path only; owned by GsplatRendererImpl
 
             public Resource(uint count, GraphicsBuffer orderBuffer)
             {

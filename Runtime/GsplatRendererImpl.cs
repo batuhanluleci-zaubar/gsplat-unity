@@ -24,6 +24,12 @@ namespace Gsplat
         public GraphicsBuffer CutoutsBuffer { get; private set; }
         public GraphicsBuffer OrderSizeBuffer { get; private set; }
         public GraphicsBuffer BoundsBuffer { get; private set; }
+        // Indirect (readback-free) draw: the true appended count copied GPU-side via CopyCount (no
+        // GetData stall). When m_indirectActive, m_remainingCount holds the CPU CAPACITY (selectedTotal,
+        // the sort/depth/draw dispatch size) and this buffer holds the exact drawn count the depth-mask
+        // and the fragment shader use to discard the sorted-to-back tail.
+        public GraphicsBuffer DrawCountBuffer { get; private set; }
+        bool m_indirectActive;
         public ISorterResource SorterResource { get; private set; }
 
         static readonly int k_orderBuffer = Shader.PropertyToID("_OrderBuffer");
@@ -47,6 +53,8 @@ namespace Gsplat
         static readonly int k_foveationStrength = Shader.PropertyToID("_GsplatFoveationStrength");
         static readonly int k_foveationCenter = Shader.PropertyToID("_GsplatFoveationCenter");
         static readonly int k_poolLiveMask = Shader.PropertyToID("_PoolLiveMask");
+        static readonly int k_useCountBuffer = Shader.PropertyToID("_UseCountBuffer");
+        static readonly int k_splatCountBuffer = Shader.PropertyToID("_SplatCountBuffer");
 
         uint m_framesBeforeRecomputeSort = 0;
         uint m_sortsBeforeRecomputeCutouts = 0;
@@ -372,7 +380,7 @@ namespace Gsplat
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, float cullMargin, int splatBudget, bool hysteresis, float hyst,
             float cullFootprintScale, bool perSplatCull, bool fade, float fadeWidth,
-            bool sseEnabled, float targetPx, float spacingGrowth)
+            bool sseEnabled, float targetPx, float spacingGrowth, bool indirectDraw = false)
         {
             EnsureChunkSetup(table);
             // The draw shader now reads the per-chunk tag + selected level + fade weight to modulate
@@ -438,7 +446,25 @@ namespace Gsplat
             else cs.DisableKeyword("FRUSTUM_CULL");
 
             cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
-            m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
+            // Count handoff. INDIRECT (readback-free): CopyCount the GPU append counter into
+            // DrawCountBuffer (GPU→GPU, no flush) and drive sort/depth/draw by the CPU capacity
+            // (m_lastBalancedTotal = Σ selected splats ≥ appended); the tail is depth-masked and
+            // fragment-discarded via the GPU count. Kills the blocking ExtractOrderSize (GetData)
+            // stall that serialized the CPU behind the 19.3M dispatch every refresh frame.
+            // READBACK (fallback / balancer off): the old blocking CopyCount+GetData.
+            if (indirectDraw && m_lastBalancedTotal > 0)
+            {
+                m_indirectActive = true;
+                GraphicsBuffer.CopyCount(SorterResource.OrderBuffer, DrawCountBuffer, 0);
+                m_remainingCount = (uint)m_lastBalancedTotal;
+                SorterResource.DrawCountBuffer = DrawCountBuffer;
+            }
+            else
+            {
+                m_indirectActive = false;
+                m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
+                SorterResource.DrawCountBuffer = null;
+            }
             m_bounds = m_gsplatAsset.Bounds;
             // Stamp the cull pose so the camera-move gate above skips rebuilds while still.
             if (camera != null)
@@ -1028,6 +1054,7 @@ namespace Gsplat
             m_cutoutsData = Array.Empty<GsplatCutout.ShaderData>();
             CutoutsBuffer = null;
             OrderSizeBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 1, sizeof(uint));
+            DrawCountBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
             BoundsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 6, sizeof(uint));
         }
 
@@ -1045,6 +1072,10 @@ namespace Gsplat
             m_propertyBlock.SetBuffer(k_splatChunkBuffer, OrderBuffer);
             m_propertyBlock.SetBuffer(k_selectedLevelBuffer, OrderBuffer);
             m_propertyBlock.SetBuffer(k_fadeWeightBuffer, OrderBuffer);
+            // Indirect-draw count buffer: dummy-bind (Metal rejects unbound declared buffers) + off
+            // by default; the combined chunked indirect path rebinds the real count in Render().
+            m_propertyBlock.SetBuffer(k_splatCountBuffer, OrderBuffer);
+            m_propertyBlock.SetFloat(k_useCountBuffer, 0f);
         }
 
         public void Dispose()
@@ -1058,6 +1089,8 @@ namespace Gsplat
             CutoutsBuffer = null;
             OrderSizeBuffer?.Dispose();
             OrderSizeBuffer = null;
+            DrawCountBuffer?.Dispose();
+            DrawCountBuffer = null;
             BoundsBuffer?.Dispose();
             BoundsBuffer = null;
             m_splatChunkBuffer?.Dispose();
@@ -1177,6 +1210,18 @@ namespace Gsplat
                 return;
 
             m_propertyBlock.SetInteger(k_splatCount, (int)m_remainingCount);
+            // Indirect draw: m_remainingCount is the CAPACITY (selectedTotal instances). The exact
+            // drawn count lives in DrawCountBuffer (GPU) — the vertex stage discards order >= it, so
+            // the sorted-to-back stale tail is never rasterised. Readback path leaves the uniform.
+            if (m_indirectActive)
+            {
+                m_propertyBlock.SetFloat(k_useCountBuffer, 1f);
+                m_propertyBlock.SetBuffer(k_splatCountBuffer, DrawCountBuffer);
+            }
+            else
+            {
+                m_propertyBlock.SetFloat(k_useCountBuffer, 0f);
+            }
             m_propertyBlock.SetInteger(k_gammaToLinear, gammaToLinear ? 1 : 0);
             m_propertyBlock.SetInteger(k_splatInstanceSize, (int)GsplatSettings.Instance.SplatInstanceSize);
             m_propertyBlock.SetInteger(k_shDegree, Math.Min(m_gsplatAsset.SHBands, shDegree));

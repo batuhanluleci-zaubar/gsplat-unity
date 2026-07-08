@@ -132,6 +132,15 @@ namespace Gsplat
                  "frustum (no holes). Costs one per-splat frustum test in the InitOrder pass.")]
         public bool ChunkedPerSplatCull = true;
 
+        [Tooltip("Combined chunked path only. Readback-free indirect draw: instead of a BLOCKING " +
+                 "ExtractOrderSize (CopyCount+GetData) that stalls the main thread behind the whole " +
+                 "cull dispatch every refresh frame (the fast-rotation p1 spike), copy the GPU append " +
+                 "count GPU-side and size the sort/depth/draw to the CPU-known selected total, masking " +
+                 "and discarding the tail. Pixel-identical; removes the per-frame CPU↔GPU sync stall. " +
+                 "Requires the budget balancer on (ChunkedSplatBudget>0) to know the capacity; falls " +
+                 "back to the blocking readback otherwise.")]
+        public bool ChunkedIndirectDraw = true;
+
         [Tooltip("Scales the per-CHUNK cull radius (the baked exact per-level footprint). Because " +
                  "Gaussian splats are semi-transparent, the tails of OFF-screen splats still add " +
                  "opacity to visible pixels — culling a whole chunk that overhangs the view thins " +
@@ -562,7 +571,10 @@ namespace Gsplat
                             // Fade uses the per-renderer draw shader; the global merged-draw path lacks the
                             // per-splat tag/fade buffers, so auto-disable fade there (would double-darken).
                             ChunkedLodFade && !GsplatSorter.Instance.GlobalRenderEnabled, ChunkedFadeWidth,
-                            ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth);
+                            ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth,
+                            // Indirect draw only when the single-renderer per-renderer draw runs (the
+                            // global merged draw consumes CPU RemainingCount and isn't wired for it yet).
+                            ChunkedIndirectDraw && !GsplatSorter.Instance.GlobalRenderEnabled);
                 }
                 else
                 {
