@@ -197,6 +197,45 @@ namespace Gsplat
             return count[0];
         }
 
+        // Shared count handoff for BOTH the combined (InitOrderChunked) and pool (InitOrderPool) dispatch
+        // paths. INDIRECT (readback-free): CopyCount the GPU append counter into DrawCountBuffer (GPU→GPU,
+        // no flush); size sort/depth by the CPU capacity CEILING (combined: Σ selected = m_lastBalancedTotal;
+        // pool: resident LiveCount), tightened toward the ACTUAL drawn count via a non-blocking async read
+        // (the draw stays EXACT via RenderMeshIndirect built from BuildDrawArgs, so a stale estimate can only
+        // under-cover the sort tail for one frame on a >1.5× reveal — never a count flicker). READBACK
+        // (fallback / balancer off): the old blocking CopyCount+GetData that stalls the CPU behind the whole
+        // cull dispatch. Sets m_indirectActive + m_remainingCount + SorterResource.DrawCountBuffer.
+        void FinalizeOrderCount(ComputeShader cs, bool indirectDraw, uint capacityCeiling)
+        {
+            if (indirectDraw && capacityCeiling > 0)
+            {
+                m_indirectActive = true;
+                GraphicsBuffer.CopyCount(SorterResource.OrderBuffer, DrawCountBuffer, 0);
+                if (!m_readbackPending)
+                {
+                    m_readbackPending = true;
+                    UnityEngine.Rendering.AsyncGPUReadback.Request(DrawCountBuffer, OnDrawCountReadback);
+                }
+                m_remainingCount = m_asyncDrawnCount > 0
+                    ? (uint)Mathf.Clamp(m_asyncDrawnCount * 1.5f, 100000f, capacityCeiling)
+                    : capacityCeiling;
+                SorterResource.DrawCountBuffer = DrawCountBuffer;
+                int instSize = (int)GsplatSettings.Instance.SplatInstanceSize;
+                int argsKernel = cs.FindKernel("BuildDrawArgs");
+                cs.SetBuffer(argsKernel, k_drawCountBuffer, DrawCountBuffer);
+                cs.SetBuffer(argsKernel, k_drawArgs, m_drawArgsBuffer);
+                cs.SetInt(k_meshIndexCount, 6 * instSize);
+                cs.SetInt(k_drawInstanceSize, instSize);
+                cs.Dispatch(argsKernel, 1, 1, 1);
+            }
+            else
+            {
+                m_indirectActive = false;
+                m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
+                SorterResource.DrawCountBuffer = null;
+            }
+        }
+
         // A3: dispatch InitOrderPool over the resident pool (O(UsedEnd), not O(UploadedCount)),
         // optionally applying the SAME per-splat frustum cull the combined path uses, and RETURN the
         // count to draw/sort. With perSplatCull the GPU appends FEWER than the live count, so the
@@ -206,11 +245,15 @@ namespace Gsplat
         // CPU-count fast path (unchanged behaviour, no regression). Shared by DispatchChunkedPool and
         // DispatchStreamingPool.
         uint DispatchInitOrderPool(ComputeShader cs, Matrix4x4 matrixWorld, Camera camera,
-            bool perSplatCull, float cullMargin, uint fallbackVisible)
+            bool perSplatCull, float cullMargin, uint fallbackVisible, bool indirectDraw)
         {
             SorterResource.OrderBuffer.SetCounterValue(0);
             if (m_poolLayout.UsedEnd <= 0 || m_poolLiveMaskBuffer == null)
+            {
+                m_indirectActive = false;
+                SorterResource.DrawCountBuffer = null;
                 return fallbackVisible;
+            }
 
             int kernel = cs.FindKernel("InitOrderPool");
             cs.SetInt(k_splatCount, m_poolLayout.UsedEnd);
@@ -231,7 +274,20 @@ namespace Gsplat
 
             cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp((uint)m_poolLayout.UsedEnd, 1024), 1, 1);
 
-            return doCull ? ExtractOrderSize(SorterResource.OrderBuffer) : fallbackVisible;
+            if (doCull)
+            {
+                // Per-splat cull appends FEWER than the live count → the true count is GPU-only. Route
+                // through the shared indirect/readback handoff (capacity ceiling = LiveCount, the exact
+                // resident count, tighter than the combined path's selected-total). Indirect kills the
+                // per-frame ExtractOrderSize stall that otherwise erases the pool's dispatch saving.
+                FinalizeOrderCount(cs, indirectDraw, fallbackVisible);
+                return m_remainingCount;
+            }
+            // No per-splat cull: LiveCount is the EXACT drawn count — readback-free CPU-count fast path.
+            m_indirectActive = false;
+            SorterResource.DrawCountBuffer = null;
+            m_remainingCount = fallbackVisible;
+            return fallbackVisible;
         }
 
         public void DispatchInitOrder(GsplatCutout[] cutouts, Matrix4x4 matrixWorld, bool cutoutsUpdateBounds,
@@ -459,47 +515,9 @@ namespace Gsplat
             else cs.DisableKeyword("FRUSTUM_CULL");
 
             cs.Dispatch(kernel, (int)GsplatUtils.DivRoundUp(res.UploadedCount, 1024), 1, 1);
-            // Count handoff. INDIRECT (readback-free): CopyCount the GPU append counter into
-            // DrawCountBuffer (GPU→GPU, no flush) and drive sort/depth/draw by the CPU capacity
-            // (m_lastBalancedTotal = Σ selected splats ≥ appended); the tail is depth-masked and
-            // fragment-discarded via the GPU count. Kills the blocking ExtractOrderSize (GetData)
-            // stall that serialized the CPU behind the 19.3M dispatch every refresh frame.
-            // READBACK (fallback / balancer off): the old blocking CopyCount+GetData.
-            if (indirectDraw && m_lastBalancedTotal > 0)
-            {
-                m_indirectActive = true;
-                GraphicsBuffer.CopyCount(SorterResource.OrderBuffer, DrawCountBuffer, 0);
-                // Sort/depth CAPACITY: the selected total (m_lastBalancedTotal) is a safe upper bound
-                // but the per-splat cull removes ~40-70% of it, so sorting it is wasteful. Tighten it
-                // toward the ACTUAL drawn count via a non-blocking async read of the GPU counter (never
-                // blocks; used ONLY to size the sort, not the draw — the draw is exact via
-                // RenderMeshIndirect, so a stale estimate can't flicker, only under-cover the sort tail
-                // for one frame on a >1.5x reveal). Generous 1.5x margin keeps that rare.
-                if (!m_readbackPending)
-                {
-                    m_readbackPending = true;
-                    UnityEngine.Rendering.AsyncGPUReadback.Request(DrawCountBuffer, OnDrawCountReadback);
-                }
-                m_remainingCount = m_asyncDrawnCount > 0
-                    ? (uint)Mathf.Clamp(m_asyncDrawnCount * 1.5f, 100000f, m_lastBalancedTotal)
-                    : (uint)m_lastBalancedTotal;
-                SorterResource.DrawCountBuffer = DrawCountBuffer;
-                // Write the EXACT indexed-draw command from the GPU count so the draw dispatches only
-                // ceil(count/128) instances (not the capacity) — no vertex-stage over-invocation.
-                int instSize = (int)GsplatSettings.Instance.SplatInstanceSize;
-                int argsKernel = cs.FindKernel("BuildDrawArgs");
-                cs.SetBuffer(argsKernel, k_drawCountBuffer, DrawCountBuffer);
-                cs.SetBuffer(argsKernel, k_drawArgs, m_drawArgsBuffer);
-                cs.SetInt(k_meshIndexCount, 6 * instSize);
-                cs.SetInt(k_drawInstanceSize, instSize);
-                cs.Dispatch(argsKernel, 1, 1, 1);
-            }
-            else
-            {
-                m_indirectActive = false;
-                m_remainingCount = ExtractOrderSize(SorterResource.OrderBuffer);
-                SorterResource.DrawCountBuffer = null;
-            }
+            // Count handoff (shared with the pool path): indirect readback-free draw/sort sized to the
+            // selected total, or the blocking readback fallback. See FinalizeOrderCount.
+            FinalizeOrderCount(cs, indirectDraw, (uint)m_lastBalancedTotal);
             m_bounds = m_gsplatAsset.Bounds;
             // Stamp the cull pose so the camera-move gate above skips rebuilds while still.
             if (camera != null)
@@ -879,7 +897,7 @@ namespace Gsplat
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
             float hyst, float cullFootprintScale, bool incrementalRefill, bool perSplatCull,
-            bool sseEnabled, float targetPx, float spacingGrowth)
+            bool sseEnabled, float targetPx, float spacingGrowth, bool indirectDraw = false)
         {
             // 4a: normally the incremental (holey) pool can't be consumed by the cross-renderer global
             // merge, so global sort forces a contiguous repack (legacy Fill, CPU wholesale re-upload).
@@ -943,7 +961,7 @@ namespace Gsplat
                 // known CPU-side (allocator LiveCount) — no counter readback needed.
                 // A3: dispatch InitOrderPool with the per-splat frustum cull; RemainingCount is the
                 // readback of the culled appended count (or the CPU LiveCount when cull is off).
-                m_remainingCount = DispatchInitOrderPool(cs, matrixWorld, camera, perSplatCull, cullMargin, visible);
+                m_remainingCount = DispatchInitOrderPool(cs, matrixWorld, camera, perSplatCull, cullMargin, visible, indirectDraw);
                 SorterResource.Initialized = true;   // the appended subset IS the sort payload;
                                                      // identity InitPayload must not overwrite it
             }
@@ -975,7 +993,7 @@ namespace Gsplat
             Camera camera, bool distanceLod, int fixedLevel, float baseDistance, float multiplier,
             float behindPenalty, bool cull, bool budgetBalance, float cullMargin, bool hysteresis,
             float hyst, float cullFootprintScale, byte shBands, bool perSplatCull,
-            bool sseEnabled, float targetPx, float spacingGrowth)
+            bool sseEnabled, float targetPx, float spacingGrowth, bool indirectDraw = false)
         {
             if (cs == null) return;
             m_streamLoader ??= new GsplatStreamingLoader(2);
@@ -1028,7 +1046,7 @@ namespace Gsplat
             }
             // A3: dispatch InitOrderPool with the per-splat frustum cull; RemainingCount is the
             // readback of the culled appended count (or the CPU LiveCount when cull is off).
-            m_remainingCount = DispatchInitOrderPool(cs, matrixWorld, camera, perSplatCull, cullMargin, visible);
+            m_remainingCount = DispatchInitOrderPool(cs, matrixWorld, camera, perSplatCull, cullMargin, visible, indirectDraw);
             SorterResource.Initialized = true;
             m_bounds = m_gsplatAsset.Bounds;
         }
@@ -1076,6 +1094,7 @@ namespace Gsplat
             m_poolLayout?.Reset(0);
             m_poolTable = null;
             m_remainingCount = 0;
+            m_indirectActive = false;   // clear stale indirect state across a combined<->pool rebind flip
             GsplatResource = null;
             m_gsplatAsset = null;
             m_gsplatAssetID = 0;

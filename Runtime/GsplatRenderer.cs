@@ -520,7 +520,8 @@ namespace Gsplat
                         sBase, sMult, ChunkedBehindPenalty, ChunkedCull, ChunkedBudgetBalancer,
                         FrustumCullMargin, ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
                         m_streamTable.SHBands, ChunkedPerSplatCull,
-                        ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth);
+                        ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth,
+                        ChunkedIndirectDraw && !GsplatSorter.Instance.GlobalRenderEnabled);
                 }
                 else if (ChunkedLod && ChunkTable != null && Application.isPlaying)
                 {
@@ -561,7 +562,8 @@ namespace Gsplat
                             ChunkedBudgetBalancer, FrustumCullMargin,
                             ChunkedLodHysteresis, ChunkedHysteresis, ChunkedCullFootprintScale,
                             ChunkedIncrementalRefill, ChunkedPerSplatCull,
-                            ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth);
+                            ChunkedLodScreenError, ChunkedLodTargetPixels, ChunkedLodSpacingGrowth,
+                            ChunkedIndirectDraw && !GsplatSorter.Instance.GlobalRenderEnabled);
                     else if (InitOrderChunkedShader != null)
                         m_renderer.DispatchInitOrderChunked(m_chunkTableParsed, InitOrderChunkedShader,
                             transform.localToWorldMatrix, runtimeCam, ChunkedDistanceLod, ChunkedFixedLevel,
