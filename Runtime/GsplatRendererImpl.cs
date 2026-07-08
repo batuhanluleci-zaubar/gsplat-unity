@@ -377,16 +377,17 @@ namespace Gsplat
             cs.SetBuffer(kernel, k_selectedLevelBuffer, m_selectedLevelBuffer);
             cs.SetBuffer(kernel, k_fadeWeightBuffer, m_fadeWeightBuffer);
 
-            // Two-tier frustum cull for the user's exact spec — "cull everything the camera
-            // can't see, cull nothing it can see." Tier 1 (per-CHUNK, ComputeSelectedLevels)
-            // drops whole off-screen chunks cheaply. Tier 2 (per-SPLAT, here) trims the
-            // OFF-SCREEN splats of the STRADDLING chunks that tier 1 keeps — a chunk half in
-            // view no longer draws its off-screen half (the tris waste the user reported),
-            // while every splat whose 3σ footprint touches the frustum is kept (no holes).
-            // Each splat survives unless its OWN footprint is fully outside, so partly-visible
-            // chunks keep exactly their visible splats. Now that the per-chunk radius is the
-            // exact baked footprint (footR), tier 2 removes genuinely off-screen splats only.
-            if (perSplatCull && cull && camera != null)
+            // Per-SPLAT frustum cull (tier 2) — the CORRECT cull for gaussian splats: each splat
+            // survives unless its OWN 3σ footprint is fully outside the frustum, so partly-visible
+            // chunks keep exactly their visible splats (no holes). DECOUPLED from the per-CHUNK cull
+            // (tier 1, ComputeSelectedLevels): tier 1's world-space bounding-sphere test is unreliable
+            // for splats (a chunk whose bounds sit outside the frustum can still have large/near splats
+            // that project on-screen — through-window exterior, overhang — so tier 1 drops visible
+            // content = grey holes), AND on this COMBINED path tier 1 saves nothing (the dispatch is
+            // O(UploadedCount) regardless; culled-chunk threads merely early-return). So the robust
+            // setup is ChunkedCull=false (tier 1 off, all chunks selected) + ChunkedPerSplatCull=true
+            // (tier 2 does the precise cull) — hence this runs on perSplatCull alone, not && cull.
+            if (perSplatCull && camera != null)
             {
                 BuildObjectSpaceFrustumPlanes(camera, matrixWorld);
                 cs.EnableKeyword("FRUSTUM_CULL");
