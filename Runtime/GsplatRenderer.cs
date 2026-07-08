@@ -207,6 +207,11 @@ namespace Gsplat
         // Full contiguous repacks of the incremental pool (fragmentation telemetry; each costs a
         // legacy-style full re-upload — frequent repacks under motion = raise ChunkedPoolBudget).
         public int ChunkedPoolRepacks => m_renderer?.PoolRepackCount ?? 0;
+        // Σ selected splats after the far-first budget balancer ran this frame (0 when inactive).
+        // HUD "Balanced" line passthrough (m_lastBalancedTotal is already public on the impl).
+        public int ChunkedBalancedTotal => m_renderer?.m_lastBalancedTotal ?? 0;
+        // Selected disk-stream chunk-levels still loading (DISK streaming only). HUD "pending" line.
+        public int ChunkedStreamPending => m_renderer?.m_streamPending ?? 0;
 
         GsplatAsset m_prevAsset;
         bool m_wasPoolMode;
