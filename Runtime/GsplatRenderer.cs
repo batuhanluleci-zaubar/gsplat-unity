@@ -498,14 +498,19 @@ namespace Gsplat
                 // Only cull at runtime: in edit mode Camera.main would cull the Scene view too,
                 // making splats vanish while you look through it.
                 var runtimeCam = Application.isPlaying ? (CullCamera != null ? CullCamera : Camera.main) : null;
-                // The combined chunked (non-pool/non-stream) path early-returns its cull+draw set on a
-                // static camera, so the sort can be skipped on those frames (rank 3, lossless). Gate the
-                // sort on the same camera predicate; pool/streaming/non-culled paths self-manage.
-                bool combinedChunkedCullPath = ChunkedLod && ChunkTable != null && Application.isPlaying
-                    && !PoolMode && !StreamingMode && InitOrderChunkedShader != null
+                // EVERY chunked camera-gated path (combined AND RAM pool) early-returns its cull+refill
+                // on a static camera (DispatchInitOrderChunked / DispatchChunkedPool both guard on
+                // !CameraMovedSinceLastCull), so the sort can be skipped on those frames (lossless). The
+                // pool path previously ran the radix EVERY frame (SortMode.Always, gate off) — the main
+                // per-frame XR churn — because it was excluded here. RAM pool residency is synchronous
+                // (set in one cull), so the retained order is valid while the cull skips → the same
+                // predicate is correct. (Disk streaming has ChunkTable==null so it stays excluded; its
+                // async residency growth would make a skipped sort stale.)
+                bool chunkedCamGatedSort = ChunkedLod && ChunkTable != null && Application.isPlaying
+                    && InitOrderChunkedShader != null
                     && !GsplatSorter.Instance.GlobalRenderEnabled;
                 m_renderer.EvaluateRefreshRequired(SortMode, SortRefreshRate - 1, CutoutsRefreshRate - 1,
-                    runtimeCam, combinedChunkedCullPath);
+                    runtimeCam, chunkedCamGatedSort);
 
                 // DISK-streaming branch: chunk-levels stream from .gsstream blobs into the pool.
                 if (StreamingMode && m_streamTable != null)
