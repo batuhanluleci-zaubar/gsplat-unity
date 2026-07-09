@@ -58,6 +58,8 @@ namespace Gsplat
         static readonly int k_orderBuffer = Shader.PropertyToID("_OrderBuffer");
         static readonly int k_maskTail = Shader.PropertyToID("_MaskTail");
         static readonly int k_drawCountBuffer = Shader.PropertyToID("_DrawCountBuffer");
+        static readonly int k_splatColorBuffer = Shader.PropertyToID("_SplatColorBuffer");
+        static readonly int k_shDegree = Shader.PropertyToID("_SHDegree");
 
         public override void Allocate()
         {
@@ -126,7 +128,11 @@ namespace Gsplat
             var res = (GsplatResourceSpark)resource;
             propertyBlock.SetBuffer(k_packedSplatsBuffer, res.PackedSplatsBuffer);
             if (SHBands >= 1)
+            {
                 propertyBlock.SetBuffer(k_packedSH1Buffer, res.PackedSH1Buffer);
+                // Draw vertex reads the precomputed per-splat SH RGB from here (computed in ComputeDepth).
+                propertyBlock.SetBuffer(k_splatColorBuffer, res.ColorBuffer);
+            }
             if (SHBands >= 2)
                 propertyBlock.SetBuffer(k_packedSH2Buffer, res.PackedSH2Buffer);
             if (SHBands >= 3)
@@ -136,7 +142,7 @@ namespace Gsplat
         }
 
         public override void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv,
-            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial)
+            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial, int shDegree)
         {
             if (count == 0) return;
             var res = (GsplatResourceSpark)resource;
@@ -148,6 +154,26 @@ namespace Gsplat
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSplatsBuffer, res.PackedSplatsBuffer);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_depthBuffer, sorterResource.InputKeys);
             cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_orderBuffer, sorterResource.OrderBuffer);
+            // Per-splat SH→RGB precompute folded into this pass (matches the SH_BANDS_{n} shader
+            // variant the draw uses). Evaluated at the SAME effective degree as the draw so the
+            // vertex read is bit-identical; gated with the sort so a static camera pays 0.
+            for (int b = 0; b <= 4; b++)
+            {
+                if (b == SHBands) cs.EnableKeyword($"SH_BANDS_{b}");
+                else cs.DisableKeyword($"SH_BANDS_{b}");
+            }
+            if (SHBands >= 1)
+            {
+                cmd.SetComputeIntParam(cs, k_shDegree, Math.Min((int)SHBands, shDegree));
+                cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_splatColorBuffer, res.ColorBuffer);
+                cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSH1Buffer, res.PackedSH1Buffer);
+                if (SHBands >= 2)
+                    cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSH2Buffer, res.PackedSH2Buffer);
+                if (SHBands >= 3)
+                    cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSH3Buffer, res.PackedSH3Buffer);
+                if (SHBands >= 4)
+                    cmd.SetComputeBufferParam(cs, kernelCalcDepthSpark, k_packedSH4Buffer, res.PackedSH4Buffer);
+            }
             // Indirect (readback-free) path: `count` is the CPU capacity (selectedTotal); mask the
             // stale tail [trueCount, count) to +inf via the GPU count. Readback path: DrawCountBuffer
             // is null, mask off, and `count` is already the exact appended count (dummy-bind to keep

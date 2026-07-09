@@ -206,7 +206,7 @@ namespace Gsplat
         // renderer's RemainingCount); entries beyond it are never consumed by the radix sort.
         // `radial` = use rotation-invariant radial distance keys instead of view-space Z.
         public abstract void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv,
-            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial);
+            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial, int shDegree);
 
         public abstract void InitOrder(ISorterResource sorterResource, GsplatResource resource,
             bool updateBounds);

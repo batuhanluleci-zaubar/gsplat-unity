@@ -352,7 +352,7 @@ namespace Gsplat
                  "look-back residency) — future work; radial keys are the prerequisite, now in place.")]
         public bool RadialSort = false;
 
-        public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv) => m_renderer.ComputeDepth(cmd, matrixMv, RadialSort);
+        public void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv) => m_renderer.ComputeDepth(cmd, matrixMv, RadialSort, SHDegree);
 
         void OnEnable()
         {

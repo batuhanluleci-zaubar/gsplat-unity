@@ -97,7 +97,7 @@ namespace Gsplat
         }
 
         public override void ComputeDepth(CommandBuffer cmd, Matrix4x4 matrixMv,
-            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial)
+            ISorterResource sorterResource, GsplatResource resource, uint count, bool radial, int shDegree)
         {
             if (count == 0) return;
             var res = (GsplatResourceUncompressed)resource;

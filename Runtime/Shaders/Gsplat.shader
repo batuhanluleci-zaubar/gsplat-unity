@@ -49,6 +49,12 @@ Shader "Gsplat/Standard"
             float _Brightness;
             float _ScaleFactor;
             StructuredBuffer<uint> _OrderBuffer;
+            #if defined(SPARK) && !defined(SH_BANDS_0)
+            // Per-splat SH RGB, precomputed once per splat in CalcDepthSpark (gated with the sort)
+            // and read here — instead of unpacking + evaluating SH 4x/splat (per quad corner) every
+            // frame. Bit-identical (same MV → same view dir). Only bound on the SPARK path.
+            StructuredBuffer<float4> _SplatColorBuffer;
+            #endif
 
             // Chunked-LOD cross-fade (anti-pop). Only read when _LodFadeEnabled>0.5 (chunked path
             // with fade on) so non-chunked/pool draws never touch these unbound buffers.
@@ -124,11 +130,17 @@ Shader "Gsplat/Standard"
                     return o;
 
                 #ifndef SH_BANDS_0
-                // calculate the model-space view direction
+                #ifdef SPARK
+                // SPARK: read the per-splat SH RGB precomputed in CalcDepthSpark (1x/splat, gated
+                // with the sort) instead of re-evaluating it here for all 4 quad corners every frame.
+                color.rgb += _SplatColorBuffer[source.id].rgb;
+                #else
+                // UNCOMPRESSED: evaluate per-vertex (unchanged).
                 float3 dir = normalize(mul(center.view, (float3x3)center.modelView));
                 float3 sh[SH_COEFFS];
                 InitSH(source.id, sh);
                 color.rgb += EvalSH(sh, dir, _SHDegree);
+                #endif
                 #endif
 
                 ClipCorner(corner, color.w);

@@ -57,6 +57,10 @@ namespace Gsplat
         public GraphicsBuffer PackedSH2Buffer { get; private set; }
         public GraphicsBuffer PackedSH3Buffer { get; private set; }
         public GraphicsBuffer PackedSH4Buffer { get; private set; }
+        // Per-splat evaluated SH RGB (float4, xyz used). Written once per splat by the depth
+        // compute (gated with the sort), read by the draw vertex — so SH is evaluated 1x/splat
+        // on camera-move instead of 4x/splat/frame in the vertex. Null when shBands == 0.
+        public GraphicsBuffer ColorBuffer { get; private set; }
 
         public GsplatResourceSpark(uint splatCount, byte shBands) : base()
         {
@@ -64,6 +68,9 @@ namespace Gsplat
                 return;
             PackedSplatsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (int)splatCount,
                 sizeof(uint) * 4);
+            if (shBands >= 1)
+                ColorBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (int)splatCount,
+                    sizeof(float) * 4);
             if (shBands >= 1)
                 PackedSH1Buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (int)splatCount,
                     sizeof(uint) * 2);
@@ -90,6 +97,8 @@ namespace Gsplat
             PackedSH3Buffer = null;
             PackedSH4Buffer?.Dispose();
             PackedSH4Buffer = null;
+            ColorBuffer?.Dispose();
+            ColorBuffer = null;
         }
     }
 }
